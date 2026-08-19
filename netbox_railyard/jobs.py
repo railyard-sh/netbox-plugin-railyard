@@ -82,6 +82,8 @@ class RailyardSyncJob(JobRunner):
         diff = target.diff_from(source, flags=flags)
         summary = diff.summary()
         self.logger.info(f"Diff: {summary}")
+        verb = "Would apply" if dry_run else "Applying"
+        self._log_changes(diff, verb)
 
         if dry_run:
             self.logger.warning("Dry run — no changes were applied.")
@@ -90,3 +92,45 @@ class RailyardSyncJob(JobRunner):
         target.sync_from(source, flags=flags)
         self.logger.info(f"Sync complete: {summary}")
         return {"dry_run": False, "diff": summary, "tag": tag.name}
+
+    # Per-object create/update/delete gets logged so a run reads as a changelog, not just a count.
+    # Creates on a first sync can number in the thousands, so each action is capped; updates show the
+    # field-level before→after.
+    _LOG_CAP = 250
+
+    def _log_changes(self, diff, verb: str) -> None:
+        from collections import defaultdict
+
+        lines: dict[str, list[str]] = {"create": [], "update": [], "delete": []}
+        counts: dict[str, dict[str, int]] = {a: defaultdict(int) for a in lines}
+
+        def ident(el) -> str:
+            return " ".join(f"{k}={v}" for k, v in (getattr(el, "keys", {}) or {}).items())
+
+        def walk(elements) -> None:
+            for el in elements:
+                action = el.action
+                if action in lines:
+                    counts[action][el.type] += 1
+                    line = f"{el.type} [{ident(el)}]"
+                    if action == "update":
+                        d = el.get_attrs_diffs()
+                        old, new = d.get("-", {}), d.get("+", {})
+                        changed = ", ".join(f"{k}: {old.get(k)!r}→{new.get(k)!r}" for k in new)
+                        if changed:
+                            line += f" — {changed}"
+                    lines[action].append(line)
+                walk(el.get_children())  # flat models have none, but recurse to be safe
+
+        walk(diff.get_children())
+
+        for action in ("create", "update", "delete"):
+            rows = lines[action]
+            if not rows:
+                continue
+            by_type = ", ".join(f"{n} {t}" for t, n in sorted(counts[action].items()))
+            self.logger.info(f"{verb} — {action} ({len(rows)}): {by_type}")
+            for row in rows[: self._LOG_CAP]:
+                self.logger.info(f"  · {action}: {row}")
+            if len(rows) > self._LOG_CAP:
+                self.logger.info(f"  · … and {len(rows) - self._LOG_CAP} more {action}s")

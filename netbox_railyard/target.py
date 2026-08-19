@@ -231,43 +231,38 @@ class NetBoxDevice(models.Device):
         return self
 
 
-class _ComponentModel:
-    """Shared get-or-create/update/delete for the simple (device, name, type) components."""
-
-    _nb_model = None  # set by subclasses
-
-    @classmethod
-    def _create_nb(cls, ids, attrs):
-        device = NBDevice.objects.filter(name=ids["device"]).first()
-        if device is None:
-            return
-        if not cls._nb_model.objects.filter(device=device, name=ids["name"]).exists():
-            cls._nb_model.objects.create(device=device, name=ids["name"], type=attrs.get("type", ""))
-
-    def _update_nb(self, attrs):
-        obj = self._nb_model.objects.filter(device__name=self.device, name=self.name).first()
-        if obj and "type" in attrs:
-            obj.type = attrs["type"]
-            obj.save()
-
-    def _delete_nb(self):
-        self._nb_model.objects.filter(device__name=self.device, name=self.name).delete()
+# Helpers for the simple (device, name, type) components. Kept as module functions rather than a mixin
+# with an `_nb_model` class attribute because DiffSyncModel is a Pydantic model, and Pydantic treats a
+# leading-underscore class attribute as a *private attribute* — so it would not resolve on the subclass.
+def _ensure_component(nb_model, ids, attrs):
+    device = NBDevice.objects.filter(name=ids["device"]).first()
+    if device is not None and not nb_model.objects.filter(device=device, name=ids["name"]).exists():
+        nb_model.objects.create(device=device, name=ids["name"], type=attrs.get("type", ""))
 
 
-class NetBoxInterface(_ComponentModel, models.Interface):
-    _nb_model = NBInterface
+def _update_component(nb_model, device_name, name, attrs):
+    obj = nb_model.objects.filter(device__name=device_name, name=name).first()
+    if obj and "type" in attrs:
+        obj.type = attrs["type"]
+        obj.save()
 
+
+def _delete_component(nb_model, device_name, name):
+    nb_model.objects.filter(device__name=device_name, name=name).delete()
+
+
+class NetBoxInterface(models.Interface):
     @classmethod
     def create(cls, adapter, ids, attrs):
-        cls._create_nb(ids, attrs)
+        _ensure_component(NBInterface, ids, attrs)
         return super().create(adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
-        self._update_nb(attrs)
+        _update_component(NBInterface, self.device, self.name, attrs)
         return super().update(attrs)
 
     def delete(self):
-        self._delete_nb()
+        _delete_component(NBInterface, self.device, self.name)
         super().delete()
         return self
 
@@ -333,38 +328,34 @@ class NetBoxFrontPort(models.FrontPort):
         return self
 
 
-class NetBoxPowerOutlet(_ComponentModel, models.PowerOutlet):
-    _nb_model = NBPowerOutlet
-
+class NetBoxPowerOutlet(models.PowerOutlet):
     @classmethod
     def create(cls, adapter, ids, attrs):
-        cls._create_nb(ids, attrs)
+        _ensure_component(NBPowerOutlet, ids, attrs)
         return super().create(adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
-        self._update_nb(attrs)
+        _update_component(NBPowerOutlet, self.device, self.name, attrs)
         return super().update(attrs)
 
     def delete(self):
-        self._delete_nb()
+        _delete_component(NBPowerOutlet, self.device, self.name)
         super().delete()
         return self
 
 
-class NetBoxPowerPort(_ComponentModel, models.PowerPort):
-    _nb_model = NBPowerPort
-
+class NetBoxPowerPort(models.PowerPort):
     @classmethod
     def create(cls, adapter, ids, attrs):
-        cls._create_nb(ids, attrs)
+        _ensure_component(NBPowerPort, ids, attrs)
         return super().create(adapter, ids=ids, attrs=attrs)
 
     def update(self, attrs):
-        self._update_nb(attrs)
+        _update_component(NBPowerPort, self.device, self.name, attrs)
         return super().update(attrs)
 
     def delete(self):
-        self._delete_nb()
+        _delete_component(NBPowerPort, self.device, self.name)
         super().delete()
         return self
 

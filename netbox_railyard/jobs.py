@@ -74,5 +74,5 @@ class RailyardSyncJob(JobRunner):
             return {"dry_run": True, "diff": summary, "sites": sorted(site_names)}
 
         target.sync_from(source, flags=flags)
-        self.logger.success(f"Sync complete: {summary}")
+        self.logger.info(f"Sync complete: {summary}")
         return {"dry_run": False, "diff": summary, "sites": sorted(site_names)}

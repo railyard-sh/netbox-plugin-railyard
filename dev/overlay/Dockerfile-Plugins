@@ -4,4 +4,5 @@ ARG VERSION=v4.6-3.4.0
 FROM netboxcommunity/netbox:${VERSION}
 
 COPY ./netbox-plugin-railyard /opt/netbox-plugin-railyard
-RUN /opt/netbox/venv/bin/pip install --no-warn-script-location /opt/netbox-plugin-railyard
+# netbox-docker 5.x ships a uv-managed venv (no pip in it), so install with uv into that venv.
+RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache /opt/netbox-plugin-railyard

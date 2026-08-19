@@ -95,3 +95,17 @@ def test_cabled_project_cables(cabled_project):
     assert ("SW-1", "dcim.interface", "Eth1", "SRV-1", "dcim.interface", "iface1", False) in cables
     # power cable: server PSU -> PDU outlet
     assert ("SRV-1", "dcim.powerport", "PSU1", "PDU-1", "dcim.poweroutlet", "OUT1", True) in cables
+
+
+def test_cable_label_kept_from_railyard(cabled_project):
+    a = load(cabled_project)
+    data = next(c for c in a.get_all(models.Cable) if not c.is_power)
+    assert data.label == "L1"  # the Railyard-set label is preserved
+
+
+def test_cable_label_synthesised_from_endpoints(cabled_project):
+    cabled_project["cables"][0].pop("label")  # drop the Railyard label so synthesis kicks in
+    a = load(cabled_project)
+    labels = {(c.a_device, c.a_name, c.b_device, c.b_name): c.label for c in a.get_all(models.Cable)}
+    assert labels[("SW-1", "Eth1", "SRV-1", "iface1")] == "SW-1:Eth1 <-> SRV-1:iface1"
+    assert labels[("SRV-1", "PSU1", "PDU-1", "OUT1")] == "SRV-1:PSU1 -> PDU-1:OUT1"

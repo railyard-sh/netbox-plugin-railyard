@@ -423,10 +423,30 @@ class NetBoxCable(models.Cable):
             _tag(cable, adapter.tag)
         return super().create(adapter, ids=ids, attrs=attrs)
 
+    def _existing_cable(self):
+        for dev, ct, name in (
+            (self.a_device, self.a_type, self.a_name),
+            (self.b_device, self.b_type, self.b_name),
+        ):
+            term = _resolve_termination(dev, ct, name)
+            if term is not None and term.cable_id:
+                return term.cable
+        return None
+
+    def update(self, attrs):
+        cable = self._existing_cable()
+        if cable is not None:
+            if "label" in attrs:
+                cable.label = attrs["label"]
+            if attrs.get("is_power"):
+                cable.type = "power"
+            cable.save()
+        return super().update(attrs)
+
     def delete(self):
-        a = _resolve_termination(self.a_device, self.a_type, self.a_name)
-        if a is not None and a.cable_id:
-            a.cable.delete()
+        cable = self._existing_cable()
+        if cable is not None:
+            cable.delete()
         super().delete()
         return self
 

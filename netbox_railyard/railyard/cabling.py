@@ -108,6 +108,13 @@ def _outlet_name(i: int) -> str:
     return f"OUT{i}"
 
 
+def _endpoint_label(a_dev: str, a_name: str, b_dev: str, b_name: str, power: bool) -> str:
+    """A human cable label built from its two terminations, used when Railyard supplies none. Power
+    cables read directionally (device -> PDU); data cables are bidirectional."""
+    sep = "->" if power else "<->"
+    return f"{a_dev}:{a_name} {sep} {b_dev}:{b_name}"
+
+
 def _cable_ref(c: dict) -> str:
     return (c.get("label") or "").strip() or c.get("id", "")
 
@@ -191,7 +198,8 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
         media = c.get("media", "")
         a_dev, a_type, a_name = resolve_end(a, media)
         b_dev, b_type, b_name = resolve_end(b, media)
-        plan.cables.append(CableLink(a_dev, a_type, a_name, b_dev, b_type, b_name, False, c.get("label", "")))
+        label = (c.get("label") or "").strip() or _endpoint_label(a_dev, a_name, b_dev, b_name, False)
+        plan.cables.append(CableLink(a_dev, a_type, a_name, b_dev, b_type, b_name, False, label))
 
     # Power links -> a synthetic inlet on each fed device joined to a PDU outlet.
     psu_count: dict[str, int] = {}
@@ -215,9 +223,19 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
         did = dev_end.get("placementId", "")
         psu_count[did] = psu_count.get(did, 0) + 1
         pp_name = f"PSU{psu_count[did]}"
+        outlet_name = _outlet_name(outlet)
         plan.power_ports.append(Component(device=dev_name, name=pp_name, ctype=inlet_type()))
         plan.cables.append(
-            CableLink(dev_name, CT_POWER_PORT, pp_name, pdu_name, CT_POWER_OUTLET, _outlet_name(outlet), True, "")
+            CableLink(
+                dev_name,
+                CT_POWER_PORT,
+                pp_name,
+                pdu_name,
+                CT_POWER_OUTLET,
+                outlet_name,
+                True,
+                _endpoint_label(dev_name, pp_name, pdu_name, outlet_name, True),
+            )
         )
 
     # Emit components in project order for stable, diff-friendly output.

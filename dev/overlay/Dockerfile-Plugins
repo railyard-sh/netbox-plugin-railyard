@@ -1,0 +1,7 @@
+# Extends the pinned netbox-docker image with this plugin installed from source.
+# VERSION is passed by docker-compose.override.yml (detected by dev/setup.sh).
+ARG VERSION=v4.6-3.4.0
+FROM netboxcommunity/netbox:${VERSION}
+
+COPY ./netbox-plugin-railyard /opt/netbox-plugin-railyard
+RUN /opt/netbox/venv/bin/pip install --no-warn-script-location /opt/netbox-plugin-railyard

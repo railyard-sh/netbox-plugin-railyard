@@ -1,0 +1,41 @@
+# netbox-docker override: build the NetBox image with the Railyard plugin baked in, and pass the
+# Railyard connection through from the host environment. Applied by dev/setup.sh.
+services:
+  netbox:
+    image: netbox-railyard:plugins
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+      args:
+        VERSION: ${VERSION:-v4.6-3.4.0}
+    ports:
+      - "8000:8080"
+    environment:
+      RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
+      RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
+      RAILYARD_ORG: ${RAILYARD_ORG:-}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+
+  netbox-worker:
+    image: netbox-railyard:plugins
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+      args:
+        VERSION: ${VERSION:-v4.6-3.4.0}
+    environment:
+      RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
+      RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
+      RAILYARD_ORG: ${RAILYARD_ORG:-}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+
+  netbox-housekeeping:
+    image: netbox-railyard:plugins
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+      args:
+        VERSION: ${VERSION:-v4.6-3.4.0}

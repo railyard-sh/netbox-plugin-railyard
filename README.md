@@ -7,9 +7,10 @@ Railyard is the *design* tool (sketch an estate: locations → data centres → 
 plan structured cabling and power). This plugin reconciles a Railyard **project** into NetBox as the
 system of record, so the sketch becomes real DCIM data without a manual CSV import.
 
-> Status: **early development (0.1).** The Railyard-side core (API client, canonical model, source
-> adapter, mapping, device-type resolution) is implemented and unit-tested. The NetBox-side target
-> adapter, sync Job and UI are landing next — see [Roadmap](#roadmap).
+> Status: **early development (0.1).** The Railyard-side core (client, canonical model, source adapter,
+> mappings, device-type resolution) is implemented and unit-tested. The NetBox-side target adapter,
+> sync Job and trigger UI are written and awaiting integration testing against a live NetBox — spin one
+> up with [`dev/setup.sh`](dev/README.md). See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -88,9 +89,10 @@ transport), the mappings, and the source adapter against `tests/fixtures/example
 - [x] Railyard API client (PAT auth, `X-Org-Id`, list orgs/projects, fetch project JSON)
 - [x] Canonical DiffSync models + Railyard source adapter (sites, racks, manufacturers, device types, roles, devices, cables, power)
 - [x] Go-parity mappings + device-type-library resolver
-- [ ] NetBox ORM target adapter (create/update/delete)
-- [ ] `RailyardSyncJob` (`JobRunner`) + trigger form + sidebar UI
-- [ ] Integration tests against a live NetBox
+- [x] NetBox ORM target adapter (create/update/delete)
+- [x] `RailyardSyncJob` (`JobRunner`) + trigger form + sidebar UI
+- [x] Local NetBox test harness (`dev/setup.sh`)
+- [ ] Integration testing / fixes against a live NetBox
 - [ ] `nautobot-plugin-railyard` (Nautobot SSoT) reusing this core
 
 ## Licence

@@ -129,7 +129,10 @@ class RailyardAdapter(Adapter):
 
         name = self._device_name(rack, pl)
         self._device_names[pl.get("id", "")] = name
-        position = None if self.project.is_zero_u(pl) else int(pl.get("startU") or 0) or None
+        zero_u = self.project.is_zero_u(pl)
+        position = None if zero_u else int(pl.get("startU") or 0) or None
+        # NetBox stores a blank face for a 0U device; match that so re-syncs don't churn.
+        face = "" if zero_u else face_for_netbox(pl.get("face"))
 
         self.get_or_instantiate(
             self.device,
@@ -141,7 +144,7 @@ class RailyardAdapter(Adapter):
                 "site": site_name,
                 "rack": rack.get("name", ""),
                 "position": position,
-                "face": face_for_netbox(pl.get("face")),
+                "face": face,
                 "status": status_slug(""),
                 "railyard_id": pl.get("id", ""),
             },

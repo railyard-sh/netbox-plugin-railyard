@@ -13,6 +13,7 @@ from netbox.jobs import JobRunner
 from .config import railyard_settings
 from .railyard.client import RailyardClient
 from .railyard.devicetype_library import DeviceTypeLibrary
+from .railyard.mappings import slugify
 from .railyard.source import RailyardAdapter
 from .target import CUSTOM_FIELD, NetBoxAdapter
 
@@ -34,6 +35,20 @@ def ensure_custom_field() -> None:
         relation.add(ct)
 
 
+def ensure_project_tag(project_name: str):
+    """Get-or-create the ``RY:<project>`` tag that marks every object this sync owns. Keyed by slug so
+    the tag is stable; the display name follows a project rename."""
+    from extras.models import Tag
+
+    name = f"RY:{project_name}"
+    slug = slugify(f"ry-{project_name}") or "ry-railyard"
+    tag, _ = Tag.objects.get_or_create(slug=slug, defaults={"name": name, "color": "1f8bff"})
+    if tag.name != name:
+        tag.name = name
+        tag.save()
+    return tag
+
+
 class RailyardSyncJob(JobRunner):
     class Meta:
         name = "Railyard → NetBox sync"
@@ -53,12 +68,11 @@ class RailyardSyncJob(JobRunner):
         for warning in source.warnings:
             self.logger.warning(warning)
 
-        site_names = {s.name for s in source.get_all(source.site)}
         ensure_custom_field()
+        tag = ensure_project_tag(source.project.name or project)
+        self.logger.info(f"Tracking Railyard-owned objects with tag {tag.name!r}.")
 
-        target = NetBoxAdapter(
-            site_names=site_names, import_components=cfg["import_components"], name="netbox"
-        )
+        target = NetBoxAdapter(tag=tag, import_components=cfg["import_components"], name="netbox")
         target.load()
 
         flags = DiffSyncFlags.CONTINUE_ON_FAILURE
@@ -71,8 +85,8 @@ class RailyardSyncJob(JobRunner):
 
         if dry_run:
             self.logger.warning("Dry run — no changes were applied.")
-            return {"dry_run": True, "diff": summary, "sites": sorted(site_names)}
+            return {"dry_run": True, "diff": summary, "tag": tag.name}
 
         target.sync_from(source, flags=flags)
         self.logger.info(f"Sync complete: {summary}")
-        return {"dry_run": False, "diff": summary, "sites": sorted(site_names)}
+        return {"dry_run": False, "diff": summary, "tag": tag.name}

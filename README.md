@@ -23,6 +23,11 @@ NetBox ORM         ──►  NetBoxAdapter (target)   ──┘
 - Railyard is the **source of truth**. The sync runs one way: **Railyard → NetBox**.
 - Default is **create/update only** (DiffSync `SKIP_UNMATCHED_DST`) — it never deletes objects an
   operator added in NetBox. An explicit **"Allow deletes"** toggle turns the sync into a full mirror.
+- **Everything the sync owns is tagged `RY:<project name>`.** The target adapter only reads back tagged
+  objects, so re-runs diff to **no-change** (idempotent), operator-added objects are never touched, and
+  a full-mirror delete only ever removes Railyard-owned objects. The first sync over pre-existing data
+  adopts and tags it rather than duplicating (get-or-create). Devices also carry a `railyard_id`
+  custom field (the Railyard placement id) for stable identity across renames.
 - **Device types come from the [netbox-community device-type library](https://github.com/netbox-community/devicetype-library)**.
   When a device needs a type NetBox doesn't have yet, the plugin fetches the matching YAML (by the
   Railyard catalogue `key`, which is the library slug) and creates the Manufacturer + Device Type

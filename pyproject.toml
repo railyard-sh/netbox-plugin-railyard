@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-plugin-railyard"
+version = "0.1.0"
+description = "Sync a Railyard data-centre design into NetBox (racks, devices, cables) with DiffSync."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Railyard" }]
+keywords = ["netbox", "netbox-plugin", "dcim", "diffsync", "railyard", "ssot"]
+classifiers = [
+  "Framework :: Django",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.12",
+]
+
+# Runtime deps for the *Railyard side* (the extractable core). NetBox itself supplies
+# Django and the DCIM ORM at runtime, so they are deliberately NOT listed here.
+dependencies = [
+  "diffsync>=2.2,<3",
+  "requests>=2.31",
+  "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/railyard-sh/netbox-plugin-railyard"
+Source = "https://github.com/railyard-sh/netbox-plugin-railyard"
+Railyard = "https://railyard.sh"
+
+[tool.setuptools.packages.find]
+include = ["netbox_railyard*"]
+
+[tool.setuptools.package-data]
+netbox_railyard = ["templates/**/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The core suite imports only the NetBox-independent `netbox_railyard.railyard`
+# package, so it runs without a NetBox install.
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

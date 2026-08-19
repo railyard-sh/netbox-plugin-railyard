@@ -20,6 +20,7 @@ from dcim.models import (
     FrontPort as NBFrontPort,
     Interface as NBInterface,
     Manufacturer as NBManufacturer,
+    PortMapping as NBPortMapping,
     PowerOutlet as NBPowerOutlet,
     PowerPort as NBPowerPort,
     Rack as NBRack,
@@ -304,11 +305,16 @@ class NetBoxFrontPort(models.FrontPort):
         if device is None or NBFrontPort.objects.filter(device=device, name=ids["name"]).exists():
             return super().create(adapter, ids=ids, attrs=attrs)
         rear = NBRearPort.objects.filter(device=device, name=attrs.get("rear_port")).first()
+        # NetBox 4.6 couples a front port to a rear port through a PortMapping row, not a rear_port FK
+        # on the front port itself. Each Railyard front port is a single connector (positions=1).
+        fp = NBFrontPort.objects.create(
+            device=device, name=ids["name"], type=attrs.get("type", "8p8c"), positions=1
+        )
         if rear is not None:
-            NBFrontPort.objects.create(
+            NBPortMapping.objects.create(
                 device=device,
-                name=ids["name"],
-                type=attrs.get("type", "8p8c"),
+                front_port=fp,
+                front_port_position=1,
                 rear_port=rear,
                 rear_port_position=attrs.get("rear_port_position", 1),
             )

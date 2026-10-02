@@ -224,6 +224,11 @@ class RailyardSyncJob(JobRunner):
                 f"Ownership tag {spec.name!r} doesn't exist yet: this sync owns nothing in NetBox, so nothing "
                 "can be updated or deleted."
             )
+            self.logger.info(
+                "Upgrading from plugin 0.1 (which tagged objects 'RY:<project name>')? Edit that tag before "
+                f"syncing so it becomes this project's: slug {spec.slug!r}, name {spec.name!r}, "
+                f"description {spec.description!r}."
+            )
         target = NetBoxAdapter(tag=tag, user=user, import_components=cfg["import_components"], name="netbox")
         report, diff, deletes = self._plan(target, source, allow_deletes)
         summary = diff.summary()

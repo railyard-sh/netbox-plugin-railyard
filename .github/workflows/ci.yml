@@ -20,3 +20,50 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest -q
+
+  netbox:
+    name: integration suite (NetBox 4.6)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: netbox
+          POSTGRES_PASSWORD: netbox
+          POSTGRES_DB: netbox
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: netbox-community/netbox
+          ref: v4.6.9
+          path: .netbox
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install NetBox
+        run: |
+          python -m venv .netbox/.venv
+          .netbox/.venv/bin/pip install -q -r .netbox/requirements.txt
+      - name: Configure NetBox
+        run: |
+          cat > .netbox/netbox/netbox/configuration.py <<'CONF'
+          ALLOWED_HOSTS = ["*"]
+          DATABASES = {"default": {"NAME": "netbox", "USER": "netbox", "PASSWORD": "netbox",
+                                   "HOST": "localhost", "PORT": 5432}}
+          REDIS = {
+              "tasks": {"HOST": "localhost", "PORT": 6379, "DATABASE": 0, "SSL": False},
+              "caching": {"HOST": "localhost", "PORT": 6379, "DATABASE": 1, "SSL": False},
+          }
+          SECRET_KEY = "ci-only-not-a-secret-ci-only-not-a-secret-ci-only-not-a-secret"
+          DEBUG = False
+          PLUGINS = ["netbox_railyard"]
+          CONF
+      - name: Test
+        run: NETBOX_DIR="$PWD/.netbox" ./dev/run-integration-tests.sh

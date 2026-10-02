@@ -29,27 +29,38 @@ See the per-layer guides:
 |---|---|
 | `netbox_railyard/railyard/` | **Core** — Railyard API client, canonical DiffSync models, source adapter, Go-parity mappings, cabling/power planner, device-type-library resolver. |
 | `netbox_railyard/{target,devicetypes,jobs,config,forms,views,urls,navigation}.py` | **Glue** — NetBox ORM writes, the `RailyardSyncJob`, and the trigger UI. |
-| `tests/` | Core suite — needs **no NetBox** (injected client transport; source runs on `fixtures/example-project.json`). |
+| `tests/` | Core suite — needs **no NetBox** (injected client transport; source runs on `fixtures/example-project.json`). `tests/integration/` needs a real NetBox (see below). |
 | `dev/` | One-command local NetBox (netbox-docker overlay) for end-to-end testing — `dev/setup.sh`. |
 
 ## Sync semantics (what actually happens)
 
-- **One-way, Railyard → NetBox.** Default is **create/update only** (`DiffSyncFlags.SKIP_UNMATCHED_DST`);
-  the trigger form's **Allow deletes** switch drops that flag for a full mirror.
-- **Ownership tag.** Every object the sync creates/adopts is tagged **`RY:<project name>`**, and the
-  target adapter loads back **only** tagged objects. Consequences: re-runs diff to **no-change**
-  (idempotent), operator-added objects are never touched, and a mirror-delete only ever removes
-  Railyard-owned objects. Creates are get-or-create, so the first run over pre-existing data **adopts
-  and tags** it instead of duplicating.
-- **Identity.** Devices by **name** (matching the Go export's globally-de-duped names) + a `railyard_id`
-  custom field (the placement id) for rename-stable matching; components by `(device, name)`; cables by
+- **One-way, Railyard → NetBox.** Default is **create/update only**; the trigger form's **Allow
+  deletes** switch also removes objects the sync created that are no longer in Railyard.
+- **Ownership tag.** Every object the sync creates is tagged with the project's ownership tag
+  (`policy.ownership_tag`: slug `ry-<project id>-<hash of instance+id>`, name `RY:<project name> (<hash>)`,
+  recognised by its exact description). The target adapter loads back **only** tagged objects, and
+  updates/deletes go by NetBox pk + tag. Untagged objects are never updated, deleted or adopted:
+  existing shared objects (manufacturer/type/role/site/rack) are used as-is, conflicting devices/ports/
+  cables are skipped and reported. Exception: same-named components on a device the sync owns are
+  adopted. Read the README's "What the sync will and won't touch" before changing any of this; it is a
+  promise to users.
+- **Permissions.** View/add/change(/delete) on the synced dcim models (`policy.required_permissions`),
+  checked by the view and re-checked by the job; every query is `.restrict()`-ed to the job's user.
+- **Targets.** Users pick an org from `railyard_org` + `railyard_allowed_orgs` (no free text) and,
+  optionally, a project from `railyard_allowed_projects`; the job re-checks both.
+- **Dry run is read-only** (no tag/custom field creation, rolled-back transaction). **A real run is
+  atomic** and change-logged as the queuing user.
+- **Identity.** Devices by **name** (matching the Go export's globally-de-duped names) plus a
+  `railyard_id` custom field (the placement id) for reference; components by `(device, name)`; cables by
   their two terminations.
 - **Cable labels.** Railyard labels are kept; when absent, a label is synthesised from the ends —
   data `A:port <-> B:port`, power `device:PSU -> pdu:OUT`.
 - **Ordering.** `models.TOP_LEVEL` encodes create-dependencies: manufacturers → device types → roles →
-  sites → racks → devices → rear ports → front ports → interfaces → power → cables.
+  sites → racks → devices → rear ports → front ports → interfaces → power → cables. Deletes run cables
+  first, then the rest in reverse.
 - **Logging.** The Job logs each create/update/delete (per-type summary + one line per object, with
-  field-level before→after on updates), capped so a first sync doesn't flood the log.
+  field-level before→after on updates), plus what it used as-is, skipped, adopted and kept. Creates and
+  updates are capped; deletes are always listed in full.
 
 ## Device types & the netbox-community dependency
 
@@ -66,9 +77,11 @@ python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest          # core suite — NO NetBox needed
 ruff check .
+NETBOX_DIR=/path/to/netbox ./dev/run-integration-tests.sh   # tests/integration, needs NetBox + Postgres
 ```
-Target runtime is **NetBox 4.6+ / Python 3.12+ / Django 6**. The glue can only be exercised inside a
-real NetBox — keep it thin, push logic into the tested core.
+Target runtime is **NetBox 4.6+ / Python 3.12+ / Django 6**. The glue is exercised by
+`tests/integration/` (Django `TestCase`s run by NetBox's `manage.py test`; pytest ignores that folder).
+Keep the glue thin and put NetBox-free decisions in `policy.py` or the core, where pytest covers them.
 
 ## Local NetBox + deploying
 

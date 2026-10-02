@@ -3,13 +3,23 @@
 It shows up in NetBox's core Jobs UI (progress, log, result). It loads the Railyard project into the
 source adapter and the scoped NetBox state into the target adapter, then reconciles with DiffSync —
 create/update only by default (``SKIP_UNMATCHED_DST``), or a full mirror when ``allow_deletes`` is set.
+
+A dry run is read-only: it never creates the ownership tag or custom field, and runs inside a
+transaction that is always rolled back as a backstop. A real run applies everything in one
+transaction (all or nothing) with NetBox's request processors active, so every change is recorded in
+the changelog against the user who queued the job and event rules fire only once it has committed.
 """
 
 from __future__ import annotations
 
+import uuid
+from contextlib import contextmanager
+
 from core.exceptions import JobFailed
 from diffsync.enum import DiffSyncFlags
+from django.db import transaction
 from netbox.jobs import JobRunner
+from utilities.request import NetBoxFakeRequest, apply_request_processors
 
 from .config import railyard_settings, railyard_token, sync_targets
 from .policy import TargetNotAllowed, insecure_url, missing_permissions
@@ -19,6 +29,39 @@ from .railyard.errors import RailyardAuthError, RailyardNotFoundError, RailyardT
 from .railyard.mappings import slugify
 from .railyard.source import RailyardAdapter
 from .target import CUSTOM_FIELD, NetBoxAdapter
+
+
+class _Rollback(Exception):
+    """Raised to roll back a dry run's transaction."""
+
+
+@contextmanager
+def _rolled_back():
+    """Run a block in a transaction that is always rolled back (a dry run's backstop against writes)."""
+    try:
+        with transaction.atomic():
+            yield
+            raise _Rollback
+    except _Rollback:
+        pass
+
+
+def _change_logging(user):
+    """NetBox's request processors (change logging, event rules) for a job running as ``user``."""
+    request = NetBoxFakeRequest(
+        {
+            "META": {},
+            "COOKIES": {},
+            "POST": {},
+            "GET": {},
+            "FILES": {},
+            "user": user,
+            "method": "POST",
+            "path": "",
+            "id": uuid.uuid4(),
+        }
+    )
+    return apply_request_processors(request)
 
 
 def ensure_custom_field() -> None:
@@ -38,13 +81,24 @@ def ensure_custom_field() -> None:
         relation.add(ct)
 
 
+def _tag_identity(project_name: str) -> tuple[str, str]:
+    return f"RY:{project_name}", slugify(f"ry-{project_name}") or "ry-railyard"
+
+
+def find_project_tag(project_name: str):
+    """The project's ownership tag if it exists, without creating or changing anything."""
+    from extras.models import Tag
+
+    _, slug = _tag_identity(project_name)
+    return Tag.objects.filter(slug=slug).first()
+
+
 def ensure_project_tag(project_name: str):
     """Get-or-create the ``RY:<project>`` tag that marks every object this sync owns. Keyed by slug so
     the tag is stable; the display name follows a project rename."""
     from extras.models import Tag
 
-    name = f"RY:{project_name}"
-    slug = slugify(f"ry-{project_name}") or "ry-railyard"
+    name, slug = _tag_identity(project_name)
     tag, _ = Tag.objects.get_or_create(slug=slug, defaults={"name": name, "color": "1f8bff"})
     if tag.name != name:
         tag.name = name
@@ -96,17 +150,42 @@ class RailyardSyncJob(JobRunner):
         try:
             client = RailyardClient(cfg["url"], token, org=org)
             doc = client.get_project(project)
+            dtl = DeviceTypeLibrary(ref=cfg["devicetype_library_ref"], cache_dir=cfg["devicetype_cache_dir"])
         except RailyardTokenRejectedError as exc:
             self._fail(f"{exc} Ask a NetBox administrator to rotate the token.")
         except (RailyardAuthError, RailyardNotFoundError, ValueError) as exc:
             self._fail(str(exc))
 
-        dtl = DeviceTypeLibrary(ref=cfg["devicetype_library_ref"], cache_dir=cfg["devicetype_cache_dir"])
         source = RailyardAdapter(doc, devicetype_library=dtl, name="railyard")
         source.load()
         for warning in source.warnings:
             self.logger.warning(warning)
 
+        if dry_run:
+            with _rolled_back():
+                return self._dry_run(source, project, cfg, allow_deletes)
+        with _change_logging(user), transaction.atomic():
+            return self._apply(source, project, cfg, allow_deletes)
+
+    def _flags(self, allow_deletes: bool) -> DiffSyncFlags:
+        # No CONTINUE_ON_FAILURE: a failed write aborts the run, and the transaction rolls everything back.
+        return DiffSyncFlags.NONE if allow_deletes else DiffSyncFlags.SKIP_UNMATCHED_DST
+
+    def _dry_run(self, source, project, cfg, allow_deletes):
+        tag = find_project_tag(source.project.name or project)
+        if tag is None:
+            self.logger.info("No ownership tag yet: NetBox holds nothing from this project, so everything is new.")
+        target = NetBoxAdapter(tag=tag, import_components=cfg["import_components"], name="netbox")
+        if tag is not None:
+            target.load()
+        diff = target.diff_from(source, flags=self._flags(allow_deletes))
+        summary = diff.summary()
+        self.logger.info(f"Diff: {summary}")
+        self._log_changes(diff, "Would apply")
+        self.logger.warning("Dry run — nothing was written to NetBox.")
+        return {"dry_run": True, "diff": summary, "tag": tag.name if tag else None}
+
+    def _apply(self, source, project, cfg, allow_deletes):
         ensure_custom_field()
         tag = ensure_project_tag(source.project.name or project)
         self.logger.info(f"Tracking Railyard-owned objects with tag {tag.name!r}.")
@@ -114,27 +193,19 @@ class RailyardSyncJob(JobRunner):
         target = NetBoxAdapter(tag=tag, import_components=cfg["import_components"], name="netbox")
         target.load()
 
-        flags = DiffSyncFlags.CONTINUE_ON_FAILURE
-        if not allow_deletes:
-            flags |= DiffSyncFlags.SKIP_UNMATCHED_DST
-
+        flags = self._flags(allow_deletes)
         diff = target.diff_from(source, flags=flags)
         summary = diff.summary()
         self.logger.info(f"Diff: {summary}")
-        verb = "Would apply" if dry_run else "Applying"
-        self._log_changes(diff, verb)
+        self._log_changes(diff, "Applying")
 
-        if dry_run:
-            self.logger.warning("Dry run — no changes were applied.")
-            return {"dry_run": True, "diff": summary, "tag": tag.name}
-
-        target.sync_from(source, flags=flags)
+        target.sync_from(source, flags=flags, diff=diff)
         self.logger.info(f"Sync complete: {summary}")
         return {"dry_run": False, "diff": summary, "tag": tag.name}
 
     # Per-object create/update/delete gets logged so a run reads as a changelog, not just a count.
-    # Creates on a first sync can number in the thousands, so each action is capped; updates show the
-    # field-level before→after.
+    # Creates on a first sync can number in the thousands, so creates and updates are capped; deletes
+    # are always listed in full so nothing is removed without being named first.
     _LOG_CAP = 250
 
     def _log_changes(self, diff, verb: str) -> None:
@@ -169,7 +240,8 @@ class RailyardSyncJob(JobRunner):
                 continue
             by_type = ", ".join(f"{n} {t}" for t, n in sorted(counts[action].items()))
             self.logger.info(f"{verb} — {action} ({len(rows)}): {by_type}")
-            for row in rows[: self._LOG_CAP]:
+            cap = len(rows) if action == "delete" else self._LOG_CAP
+            for row in rows[:cap]:
                 self.logger.info(f"  · {action}: {row}")
-            if len(rows) > self._LOG_CAP:
-                self.logger.info(f"  · … and {len(rows) - self._LOG_CAP} more {action}s")
+            if len(rows) > cap:
+                self.logger.info(f"  · … and {len(rows) - cap} more {action}s")

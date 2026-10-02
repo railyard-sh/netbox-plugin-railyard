@@ -7,6 +7,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import redirect, render
 from django.views.generic import View
 
+from .config import sync_targets
 from .forms import RailyardSyncForm
 from .jobs import RailyardSyncJob
 
@@ -15,10 +16,11 @@ TEMPLATE = "netbox_railyard/sync.html"
 
 class RailyardSyncView(LoginRequiredMixin, View):
     def get(self, request):
-        return render(request, TEMPLATE, {"form": RailyardSyncForm(initial={"dry_run": True})})
+        form = RailyardSyncForm(initial={"dry_run": True}, targets=sync_targets())
+        return render(request, TEMPLATE, {"form": form})
 
     def post(self, request):
-        form = RailyardSyncForm(request.POST)
+        form = RailyardSyncForm(request.POST, targets=sync_targets())
         if form.is_valid():
             job = RailyardSyncJob.enqueue(
                 project=form.cleaned_data["project"],

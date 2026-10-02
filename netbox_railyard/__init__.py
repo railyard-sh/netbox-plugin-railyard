@@ -30,7 +30,10 @@ if PluginConfig is not None:
         default_settings = {
             "railyard_url": "https://railyard.sh",
             "railyard_token": "",
-            "railyard_org": None,  # optional default org (id, slug or name)
+            "railyard_token_file": None,  # path to a file holding the token (e.g. a mounted secret)
+            "railyard_org": None,  # default org (id, slug or name); always allowed
+            "railyard_allowed_orgs": [],  # further orgs users may pick; nothing else is reachable
+            "railyard_allowed_projects": [],  # optional project id/slug allowlist; empty = any project
             "devicetype_library_ref": None,  # devicetype-library commit; None = the pinned DEFAULT_REF
             "devicetype_cache_dir": None,  # optional on-disk cache for fetched device-type YAML
         }

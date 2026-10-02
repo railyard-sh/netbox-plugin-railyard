@@ -7,12 +7,15 @@ create/update only by default (``SKIP_UNMATCHED_DST``), or a full mirror when ``
 
 from __future__ import annotations
 
+from core.exceptions import JobFailed
 from diffsync.enum import DiffSyncFlags
 from netbox.jobs import JobRunner
 
-from .config import railyard_settings
+from .config import railyard_settings, railyard_token, sync_targets
+from .policy import TargetNotAllowed, insecure_url
 from .railyard.client import RailyardClient
 from .railyard.devicetype_library import DeviceTypeLibrary
+from .railyard.errors import RailyardAuthError, RailyardNotFoundError, RailyardTokenRejectedError
 from .railyard.mappings import slugify
 from .railyard.source import RailyardAdapter
 from .target import CUSTOM_FIELD, NetBoxAdapter
@@ -53,14 +56,41 @@ class RailyardSyncJob(JobRunner):
     class Meta:
         name = "Railyard → NetBox sync"
 
+    def _fail(self, message: str):
+        self.logger.error(message)
+        raise JobFailed(message)
+
     def run(self, *, project, org=None, dry_run=False, allow_deletes=False, **kwargs):
         cfg = railyard_settings()
-        if not cfg["token"]:
-            raise ValueError("Set 'railyard_token' in PLUGINS_CONFIG['netbox_railyard'] first.")
 
-        self.logger.info(f"Fetching Railyard project {project!r}…")
-        client = RailyardClient(cfg["url"], cfg["token"], org=org or cfg["org"])
-        doc = client.get_project(project)
+        # Re-check the target against the allowlist here too: the job is the enforcement point, whatever
+        # enqueued it (the form, a shell, a re-run of an older job).
+        targets = sync_targets()
+        try:
+            org = targets.check_org(org)
+            project = targets.check_project(project)
+        except TargetNotAllowed as exc:
+            self._fail(str(exc))
+
+        try:
+            token = railyard_token()
+        except ValueError as exc:
+            self._fail(str(exc))
+        if not token:
+            self._fail("Set 'railyard_token' or 'railyard_token_file' in PLUGINS_CONFIG['netbox_railyard'] first.")
+        if insecure_url(cfg["url"]):
+            self.logger.warning(
+                f"railyard_url {cfg['url']!r} is not https: the Railyard token is sent in clear text. Use https."
+            )
+
+        self.logger.info(f"Fetching Railyard project {project!r} from org {org or '(personal)'!r}…")
+        try:
+            client = RailyardClient(cfg["url"], token, org=org)
+            doc = client.get_project(project)
+        except RailyardTokenRejectedError as exc:
+            self._fail(f"{exc} Ask a NetBox administrator to rotate the token.")
+        except (RailyardAuthError, RailyardNotFoundError, ValueError) as exc:
+            self._fail(str(exc))
 
         dtl = DeviceTypeLibrary(ref=cfg["devicetype_library_ref"], cache_dir=cfg["devicetype_cache_dir"])
         source = RailyardAdapter(doc, devicetype_library=dtl, name="railyard")

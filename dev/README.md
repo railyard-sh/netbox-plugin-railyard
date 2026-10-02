@@ -7,7 +7,8 @@ this plugin installed, so you can run a Railyard → NetBox sync end-to-end.
 
 - **Docker Desktop running.**
 - A **Railyard personal access token** (`ry_…`) with access to the org/project you want to sync
-  (Railyard → User settings → Personal access tokens).
+  (Railyard → User settings → Personal access tokens). Prefer a token for a dedicated *viewer* user
+  with a short expiry (see the main README), and never commit it.
 
 ## Bring it up
 
@@ -17,6 +18,7 @@ cd ../netbox-docker-railyard         # the work dir setup.sh prints
 
 export RAILYARD_TOKEN=ry_your_token_here
 export RAILYARD_URL=https://railyard.sh      # or dev.railyard.sh, or your own instance
+export RAILYARD_ORG=my-org                   # the org to sync from (else your personal org)
 
 docker compose build
 docker compose up -d
@@ -27,7 +29,7 @@ docker compose logs -f netbox | grep -m1 "Application ready"
 docker compose exec netbox /opt/netbox/netbox/manage.py createsuperuser
 ```
 
-Then open **http://localhost:8000**, sign in, and go to **Plugins → Railyard → Run sync**. Enter a
+NetBox listens on **127.0.0.1:8000** only. Open **http://localhost:8000**, sign in, and go to **Plugins → Railyard → Run sync**. Enter a
 project id/slug (and org if needed), keep **Dry run** ticked for the first pass to preview the diff in
 the job log, then untick it to apply.
 
@@ -52,8 +54,9 @@ docker compose down -v         # wipe the database/volumes too
 `dev/setup.sh` clones netbox-docker, copies the plugin source into its build context, and drops in:
 
 - `Dockerfile-Plugins` — `FROM` the pinned NetBox image, `pip install` the plugin
-- `docker-compose.override.yml` — builds netbox/worker/housekeeping from that image, maps port 8000,
-  and passes `RAILYARD_*` env through
+- `docker-compose.override.yml` — builds netbox/worker/housekeeping from that image, maps port 8000
+  on the loopback interface only, and passes `RAILYARD_*` env through
 - `configuration/plugins.py` — enables `netbox_railyard` and wires `PLUGINS_CONFIG` from the env
 
-Nothing here is needed to *use* the plugin in a real NetBox — it's only the local test harness.
+Nothing here is needed to *use* the plugin in a real NetBox — it's only the local test harness. For
+automated tests against NetBox without Docker, see `dev/run-integration-tests.sh`.

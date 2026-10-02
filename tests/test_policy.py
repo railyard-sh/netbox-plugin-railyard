@@ -107,3 +107,32 @@ def test_insecure_url():
     assert not insecure_url("http://127.0.0.1:8080")
     assert insecure_url("http://railyard.internal")
     assert insecure_url("ftp://x")
+
+
+# ---- permissions ------------------------------------------------------------
+
+from netbox_railyard.policy import SYNC_MODELS, missing_permissions, required_permissions  # noqa: E402
+
+
+def test_dry_run_needs_only_view():
+    perms = required_permissions(dry_run=True, allow_deletes=True)  # deletes don't matter for a dry run
+    assert perms == {f"dcim.view_{m}" for m in SYNC_MODELS} | {"extras.view_tag"}
+
+
+def test_apply_needs_add_and_change():
+    perms = required_permissions(dry_run=False, allow_deletes=False)
+    assert "dcim.add_device" in perms and "dcim.change_cable" in perms
+    assert not any(p.startswith("dcim.delete_") for p in perms)
+
+
+def test_apply_with_deletes_needs_delete():
+    perms = required_permissions(dry_run=False, allow_deletes=True)
+    assert {f"dcim.delete_{m}" for m in SYNC_MODELS} <= perms
+
+
+def test_missing_permissions_lists_what_is_denied():
+    granted = {f"dcim.view_{m}" for m in SYNC_MODELS} | {"extras.view_tag"}
+    assert missing_permissions(granted.__contains__, dry_run=True, allow_deletes=False) == []
+    missing = missing_permissions(granted.__contains__, dry_run=False, allow_deletes=False)
+    assert "dcim.add_device" in missing and "dcim.view_device" not in missing
+    assert missing == sorted(missing)

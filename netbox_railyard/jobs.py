@@ -12,7 +12,7 @@ from diffsync.enum import DiffSyncFlags
 from netbox.jobs import JobRunner
 
 from .config import railyard_settings, railyard_token, sync_targets
-from .policy import TargetNotAllowed, insecure_url
+from .policy import TargetNotAllowed, insecure_url, missing_permissions
 from .railyard.client import RailyardClient
 from .railyard.devicetype_library import DeviceTypeLibrary
 from .railyard.errors import RailyardAuthError, RailyardNotFoundError, RailyardTokenRejectedError
@@ -62,6 +62,15 @@ class RailyardSyncJob(JobRunner):
 
     def run(self, *, project, org=None, dry_run=False, allow_deletes=False, **kwargs):
         cfg = railyard_settings()
+
+        # The job acts as the user who queued it, and re-checks their permissions now: they may have
+        # changed since it was queued, and a job can be queued by other means than the form.
+        user = self.job.user
+        if user is None or not user.is_active:
+            self._fail("A Railyard sync must be queued by an active NetBox user.")
+        missing = missing_permissions(user.has_perm, dry_run=dry_run, allow_deletes=allow_deletes)
+        if missing:
+            self._fail(f"{user} lacks the NetBox permissions this sync needs: {', '.join(missing)}")
 
         # Re-check the target against the allowlist here too: the job is the enforcement point, whatever
         # enqueued it (the form, a shell, a re-run of an older job).

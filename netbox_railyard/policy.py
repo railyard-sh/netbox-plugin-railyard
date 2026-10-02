@@ -19,6 +19,47 @@ _PROJECT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$")
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
+#: The dcim models a sync reads and writes (``<app>.<action>_<model>`` permission codenames).
+SYNC_MODELS = (
+    "manufacturer",
+    "devicetype",
+    "devicerole",
+    "site",
+    "rack",
+    "device",
+    "interface",
+    "frontport",
+    "rearport",
+    "portmapping",
+    "poweroutlet",
+    "powerport",
+    "cable",
+)
+
+
+def required_permissions(*, dry_run: bool, allow_deletes: bool) -> frozenset[str]:
+    """The NetBox permissions a user needs to run a sync with these options.
+
+    A dry run reads NetBox (and shows what it found in the job log), so it needs ``view`` on every
+    synced model. Applying needs ``add`` and ``change`` as well, and ``delete`` when deletes are on.
+    Object-level constraints on those permissions are enforced separately, per object, by the target
+    adapter (``.restrict()``).
+    """
+    actions = ["view"]
+    if not dry_run:
+        actions += ["add", "change"]
+        if allow_deletes:
+            actions.append("delete")
+    perms = {f"dcim.{action}_{model}" for action in actions for model in SYNC_MODELS}
+    perms.add("extras.view_tag")
+    return frozenset(perms)
+
+
+def missing_permissions(has_perm, *, dry_run: bool, allow_deletes: bool) -> list[str]:
+    """The required permissions ``has_perm(codename)`` denies, sorted (empty when all are held)."""
+    return sorted(p for p in required_permissions(dry_run=dry_run, allow_deletes=allow_deletes) if not has_perm(p))
+
+
 class TargetNotAllowed(ValueError):
     """The requested org or project is not one this NetBox is configured to sync from."""
 

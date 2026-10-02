@@ -13,7 +13,16 @@ class RailyardAPIError(Exception):
 
 
 class RailyardAuthError(RailyardAPIError):
-    """401/403 — the personal access token is missing, wrong, or lacks access."""
+    """401/403 — the personal access token is missing, wrong, expired, or lacks access."""
+
+
+class RailyardTokenRejectedError(RailyardAuthError):
+    """401 — Railyard did not accept the token at all: it is wrong, revoked or expired. Railyard
+    personal access tokens expire, so this is the normal symptom of a token that needs rotating."""
+
+
+class RailyardForbiddenError(RailyardAuthError):
+    """403 — the token is valid but its user may not read this org or project."""
 
 
 class RailyardNotFoundError(RailyardAPIError):

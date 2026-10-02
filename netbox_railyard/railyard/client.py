@@ -18,7 +18,12 @@ from __future__ import annotations
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from .errors import RailyardAPIError, RailyardAuthError, RailyardNotFoundError
+from .errors import (
+    RailyardAPIError,
+    RailyardForbiddenError,
+    RailyardNotFoundError,
+    RailyardTokenRejectedError,
+)
 
 TOKEN_PREFIX = "ry_"
 
@@ -84,10 +89,17 @@ class RailyardClient:
             "GET", url, headers=self._headers(org_id), params=params, timeout=self._timeout
         )
         status = resp.status_code
-        if status in (401, 403):
-            raise RailyardAuthError(
-                f"Railyard rejected the token (HTTP {status}) for {path} — check the PAT is a current "
-                f"{TOKEN_PREFIX}… token with access to the org.",
+        if status == 401:
+            raise RailyardTokenRejectedError(
+                "Railyard rejected the personal access token (HTTP 401): it is wrong, revoked or expired. "
+                "Railyard tokens expire, so create a new token in Railyard (User settings → Personal access "
+                "tokens) and update the plugin's railyard_token / railyard_token_file setting.",
+                status=status,
+            )
+        if status == 403:
+            raise RailyardForbiddenError(
+                f"Railyard refused access (HTTP 403) for {path}: the token is valid, but its user may not "
+                "read this organisation or project. Add that user to the organisation in Railyard.",
                 status=status,
             )
         if status == 404:
@@ -109,20 +121,25 @@ class RailyardClient:
     def list_orgs(self) -> list[dict]:
         return list(self._get("/api/orgs") or [])
 
+    def find_org(self, ref: str) -> dict:
+        """The org record matching an id, slug or name (case-insensitive). Ids and slugs are checked
+        before names, so a name that happens to equal another org's slug can't shadow it."""
+        needle = (ref or "").strip().lower()
+        if not needle:
+            raise ValueError("org ref is required")
+        orgs = self.list_orgs()
+        for key in ("id", "slug", "name"):
+            for org in orgs:
+                if str(org.get(key, "")).lower() == needle:
+                    return org
+        raise RailyardNotFoundError(f"No org matched {ref!r} (by id, slug or name).")
+
     def resolve_org(self, ref: str | None) -> str | None:
         """Resolve an org id/slug/name to its id. ``None`` ref → ``None`` (the server then defaults
         to the caller's personal org)."""
         if ref is None or ref == "":
             return None
-        needle = ref.strip().lower()
-        for org in self.list_orgs():
-            if needle in (
-                str(org.get("id", "")).lower(),
-                str(org.get("slug", "")).lower(),
-                str(org.get("name", "")).lower(),
-            ):
-                return str(org["id"])
-        raise RailyardNotFoundError(f"No org matched {ref!r} (by id, slug or name).")
+        return str(self.find_org(ref)["id"])
 
     def org_id(self) -> str | None:
         """The resolved id of the client's default org (memoised)."""

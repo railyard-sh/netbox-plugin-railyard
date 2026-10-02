@@ -4,7 +4,12 @@ import pytest
 from conftest import FakeResponse, FakeSession
 
 from netbox_railyard.railyard.client import RailyardClient
-from netbox_railyard.railyard.errors import RailyardAuthError, RailyardNotFoundError
+from netbox_railyard.railyard.errors import (
+    RailyardAuthError,
+    RailyardForbiddenError,
+    RailyardNotFoundError,
+    RailyardTokenRejectedError,
+)
 
 ORGS = [
     {"id": "org_personal", "name": "Personal", "slug": "personal", "personal": True},
@@ -85,3 +90,33 @@ def test_project_ref_is_escaped_as_one_path_segment():
 
     make_client(handler).get_project("../orgs?x=1")
     assert seen == ["https://railyard.sh/api/projects/..%2Forgs%3Fx%3D1"]
+
+
+def test_401_says_the_token_was_rejected_and_how_to_rotate_it():
+    client = make_client(lambda *a: FakeResponse(401, {"error": "authentication required"}))
+    with pytest.raises(RailyardTokenRejectedError) as exc:
+        client.get_project("prj1")
+    msg = str(exc.value)
+    assert "expired" in msg and "Personal access tokens" in msg
+    assert "ry_secret" not in msg  # never echo the token
+    assert isinstance(exc.value, RailyardAuthError)  # still catchable as the broad auth error
+
+
+def test_403_is_a_permission_problem_not_a_token_problem():
+    def handler(method, url, headers, params):
+        if url.endswith("/api/orgs"):
+            return FakeResponse(200, ORGS)
+        return FakeResponse(403, {"error": "forbidden"})
+
+    with pytest.raises(RailyardForbiddenError) as exc:
+        make_client(handler, org="acme").get_project("prj1")
+    assert not isinstance(exc.value, RailyardTokenRejectedError)
+
+
+def test_find_org_prefers_id_and_slug_over_name():
+    orgs = [
+        {"id": "org_1", "name": "acme", "slug": "something-else"},
+        {"id": "org_2", "name": "Acme Corp", "slug": "acme"},
+    ]
+    client = make_client(lambda *a: FakeResponse(200, orgs))
+    assert client.find_org("acme")["id"] == "org_2"  # slug match wins over org_1's name

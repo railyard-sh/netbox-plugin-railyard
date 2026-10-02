@@ -7,11 +7,14 @@ the NetBox glue (``forms``, ``views``, ``jobs``) calls into it and enforces the 
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from .railyard.mappings import slugify
 
 #: A project id or URL slug. Railyard ids and slugs are ASCII words joined by ``-``/``_``/``.``.
 _PROJECT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$")
@@ -154,3 +157,50 @@ def insecure_url(url: str) -> bool:
     if parts.scheme == "https":
         return False
     return not (parts.scheme == "http" and (parts.hostname or "") in _LOOPBACK_HOSTS)
+
+
+# ---- ownership tag ------------------------------------------------------------------------------
+
+#: Written into the tag's description; its exact value is how the sync recognises its own tag.
+_TAG_MARKER = "railyard-sync:v1"
+
+
+@dataclass(frozen=True)
+class TagSpec:
+    """The NetBox tag that marks the objects one Railyard project (on one Railyard instance) owns."""
+
+    slug: str
+    name: str
+    description: str
+
+
+def instance_key(url: str) -> str:
+    """A stable identity for a Railyard instance: host[:port][/path], lower-cased, ignoring the scheme,
+    default ports and a trailing slash (so ``https://Railyard.sh/`` and ``http://railyard.sh`` match)."""
+    parts = urlsplit((url or "").strip())
+    host = (parts.hostname or "").lower()
+    port = parts.port
+    if port and port not in (80, 443):
+        host = f"{host}:{port}"
+    return host + parts.path.rstrip("/")
+
+
+def ownership_tag(base_url: str, project_id: str, project_name: str = "") -> TagSpec:
+    """The ownership tag for a project, keyed by the Railyard instance and the project's immutable id.
+
+    Two projects with the same name, or the same project id on two Railyard instances, get different
+    tags, so one sync can never treat another's objects as its own. The name carries a short digest for
+    the same reason (NetBox tag names are unique too) and follows project renames; the slug and the
+    description never change for a given project.
+    """
+    pid = (project_id or "").strip()
+    if not pid:
+        raise ValueError("The Railyard project document has no id, so its objects can't be tracked safely.")
+    instance = instance_key(base_url)
+    digest = hashlib.sha256(f"{instance}\n{pid}".encode()).hexdigest()
+    label = " ".join((project_name or pid).split())[:80]
+    return TagSpec(
+        slug=f"ry-{slugify(pid)[:60]}-{digest[:10]}",
+        name=f"RY:{label} ({digest[:8]})",
+        description=f"Managed by the Railyard sync. {_TAG_MARKER} project={pid} instance={instance}"[:200],
+    )

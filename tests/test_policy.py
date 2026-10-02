@@ -136,3 +136,43 @@ def test_missing_permissions_lists_what_is_denied():
     missing = missing_permissions(granted.__contains__, dry_run=False, allow_deletes=False)
     assert "dcim.add_device" in missing and "dcim.view_device" not in missing
     assert missing == sorted(missing)
+
+
+# ---- ownership tag ----------------------------------------------------------
+
+from netbox_railyard.policy import instance_key, ownership_tag  # noqa: E402
+
+
+def test_tag_is_keyed_by_project_id_not_name():
+    a = ownership_tag("https://railyard.sh", "prj_a", "Same name")
+    b = ownership_tag("https://railyard.sh", "prj_b", "Same name")
+    assert a.slug != b.slug and a.name != b.name and a.description != b.description
+
+
+def test_tag_is_keyed_by_instance():
+    a = ownership_tag("https://railyard.sh", "prj_a", "X")
+    b = ownership_tag("https://railyard.example.com", "prj_a", "X")
+    assert a.slug != b.slug
+
+
+def test_rename_changes_only_the_display_name():
+    a = ownership_tag("https://railyard.sh", "prj_a", "Old")
+    b = ownership_tag("https://railyard.sh", "prj_a", "New")
+    assert (a.slug, a.description) == (b.slug, b.description)
+    assert a.name != b.name
+
+
+def test_tag_fits_netbox_limits():
+    spec = ownership_tag("https://" + "h" * 300 + ".example", "p" * 300, "n" * 300)
+    assert len(spec.slug) <= 100 and len(spec.name) <= 100 and len(spec.description) <= 200
+
+
+def test_instance_key_normalises_scheme_port_and_slash():
+    assert instance_key("https://Railyard.sh/") == instance_key("http://railyard.sh") == "railyard.sh"
+    assert instance_key("https://railyard.sh:443") == "railyard.sh"
+    assert instance_key("https://ry.local:8443/base/") == "ry.local:8443/base"
+
+
+def test_project_without_id_is_refused():
+    with pytest.raises(ValueError):
+        ownership_tag("https://railyard.sh", "", "Name only")

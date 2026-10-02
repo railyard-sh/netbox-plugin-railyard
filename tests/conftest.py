@@ -11,6 +11,9 @@ import pytest
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
+# tests/integration needs a live NetBox (it runs under NetBox's own test runner; see its README).
+collect_ignore = ["integration"]
+
 
 # ---- fake HTTP session for RailyardClient ---------------------------------
 

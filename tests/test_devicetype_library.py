@@ -74,3 +74,37 @@ def test_results_are_memoised():
     lib.resolve(CATALOGUE_ENTRY)
     lib.resolve(CATALOGUE_ENTRY)
     assert count["n"] == 1  # second resolve served from memory
+
+
+def test_default_ref_is_a_pinned_commit():
+    from netbox_railyard.railyard.devicetype_library import DEFAULT_REF
+
+    lib = DeviceTypeLibrary(fetcher=lambda url: None)
+    assert lib.ref == DEFAULT_REF
+    assert len(DEFAULT_REF) == 40 and all(c in "0123456789abcdef" for c in DEFAULT_REF)
+
+
+def test_path_segments_are_fully_escaped():
+    calls = []
+    lib = DeviceTypeLibrary(fetcher=lambda url: calls.append(url))
+    lib.resolve({**CATALOGUE_ENTRY, "manufacturer": "A/B", "model": "../x?y#z"})
+    assert calls == [
+        "https://raw.githubusercontent.com/netbox-community/devicetype-library/"
+        "0451a7c5977351e7a43fbff54eb44f26ed85344f/device-types/A%2FB/..%2Fx%3Fy%23z.yaml"
+    ]
+
+
+def test_dot_segments_never_reach_the_fetcher():
+    calls = []
+    lib = DeviceTypeLibrary(fetcher=lambda url: calls.append(url))
+    spec = lib.resolve({**CATALOGUE_ENTRY, "manufacturer": "..", "model": "x"})
+    assert calls == []
+    assert spec.source == "catalogue"
+
+
+def test_invalid_ref_is_rejected():
+    import pytest
+
+    for bad in ("../../evil", "master?x", "a b", "/abs"):
+        with pytest.raises(ValueError):
+            DeviceTypeLibrary(ref=bad, fetcher=lambda url: None)

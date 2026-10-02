@@ -16,7 +16,7 @@ def railyard_settings() -> dict:
         "url": setting("railyard_url", "https://railyard.sh"),
         "token": setting("railyard_token", ""),
         "org": setting("railyard_org"),
-        "devicetype_library_ref": setting("devicetype_library_ref", "master"),
+        "devicetype_library_ref": setting("devicetype_library_ref"),
         "devicetype_cache_dir": setting("devicetype_cache_dir"),
         "import_components": setting("import_components", False),
     }

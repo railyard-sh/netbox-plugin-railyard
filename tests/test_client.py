@@ -74,3 +74,14 @@ def test_not_found_maps_to_typed_exception():
     client = make_client(handler)
     with pytest.raises(RailyardNotFoundError):
         client.get_project("ghost")
+
+
+def test_project_ref_is_escaped_as_one_path_segment():
+    seen = []
+
+    def handler(method, url, headers, params):
+        seen.append(url)
+        return FakeResponse(200, {"id": "x"})
+
+    make_client(handler).get_project("../orgs?x=1")
+    assert seen == ["https://railyard.sh/api/projects/..%2Forgs%3Fx%3D1"]

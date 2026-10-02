@@ -15,7 +15,7 @@ services:
       RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
       RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
       RAILYARD_ORG: ${RAILYARD_ORG:-}
-      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-}
 
   netbox-worker:
     image: netbox-railyard:plugins
@@ -29,4 +29,4 @@ services:
       RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
       RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
       RAILYARD_ORG: ${RAILYARD_ORG:-}
-      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-}

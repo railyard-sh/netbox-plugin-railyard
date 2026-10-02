@@ -10,7 +10,7 @@ PLUGINS_CONFIG = {
         "railyard_url": os.environ.get("RAILYARD_URL", "https://railyard.sh"),
         "railyard_token": os.environ.get("RAILYARD_TOKEN", ""),
         "railyard_org": os.environ.get("RAILYARD_ORG") or None,
-        "devicetype_library_ref": os.environ.get("RAILYARD_DEVICETYPE_REF", "master"),
+        "devicetype_library_ref": os.environ.get("RAILYARD_DEVICETYPE_REF") or None,
         "devicetype_cache_dir": "/opt/netbox/devicetype-cache",
     }
 }

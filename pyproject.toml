@@ -20,10 +20,16 @@ classifiers = [
 
 # Runtime deps for the *Railyard side* (the extractable core). NetBox itself supplies
 # Django and the DCIM ORM at runtime, so they are deliberately NOT listed here.
+#
+# Lower bounds are security floors; upper bounds stop an untested major release arriving silently:
+# - requests 2.32.4 fixes CVE-2024-35195 (verify=False sticking to a Session) and CVE-2024-47081
+#   (.netrc credential leak to a different host via a crafted URL); 2.31 is affected by both.
+# - diffsync 2.x is the API this code is written against (Adapter, DiffSyncFlags).
+# - PyYAML 6 removed unsafe default loaders; only yaml.safe_load is used.
 dependencies = [
   "diffsync>=2.2,<3",
-  "requests>=2.31",
-  "PyYAML>=6",
+  "requests>=2.32.4,<3",
+  "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]

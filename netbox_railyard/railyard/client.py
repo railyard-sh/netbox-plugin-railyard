@@ -16,6 +16,7 @@ injected, which is how the tests avoid real network access.
 from __future__ import annotations
 
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from .errors import RailyardAPIError, RailyardAuthError, RailyardNotFoundError
 
@@ -138,4 +139,5 @@ class RailyardClient:
         """Fetch a project's FULL JSON document by id or URL slug."""
         if not ref:
             raise ValueError("project ref is required")
-        return self._get(f"/api/projects/{ref}", org_id=org_id or self.org_id())
+        # Escape the ref as a single path segment so it can't address another endpoint.
+        return self._get(f"/api/projects/{quote(str(ref), safe='')}", org_id=org_id or self.org_id())

@@ -64,8 +64,8 @@ PLUGINS_CONFIG = {
         "railyard_url": "https://railyard.sh",   # your Railyard base URL
         "railyard_token": "ry_...",              # a Railyard personal access token
         "railyard_org": "my-org",                # optional default org (id, slug or name)
-        # device-type library source (pinned):
-        "devicetype_library_ref": "master",
+        # device-type library commit; defaults to a pinned SHA. Override only after reviewing upstream.
+        # "devicetype_library_ref": "<40-character commit SHA>",
     },
 }
 ```

@@ -26,6 +26,12 @@ CT_REAR_PORT = "dcim.rearport"
 CT_POWER_PORT = "dcim.powerport"
 CT_POWER_OUTLET = "dcim.poweroutlet"
 
+# Upper bounds on the components emitted for one device. Real hardware is far below these (a dense
+# patch panel has a few hundred ports); they stop a malformed or hostile project document from making a
+# sync create an unbounded number of NetBox objects.
+MAX_PORTS_PER_SIDE = 1024
+MAX_OUTLETS = 512
+
 # name_of(placement_id) -> (device_name, ok); ok=False when the placement produced no device row.
 NameOf = Callable[[str], "tuple[str, bool]"]
 
@@ -81,9 +87,27 @@ def _rear_port_name(sp: dict, i: int) -> str:
     return _port_def_name(sp.get("rearPorts", []), i)
 
 
+def _count(value: object) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bounded(n: int, limit: int, what: str, dev: str, warnings: list[str]) -> int:
+    if n > limit:
+        warnings.append(f"{dev}: {n} {what} exceeds the limit of {limit}; only the first {limit} are synced")
+        return limit
+    return n
+
+
+def _front_count(sp: dict) -> int:
+    return _count(sp.get("front"))
+
+
 def _rear_count(sp: dict) -> int:
-    if int(sp.get("rear") or 0) > 0:
-        return int(sp["rear"])
+    if _count(sp.get("rear")) > 0:
+        return _count(sp.get("rear"))
     return len(sp.get("rearPorts", []))
 
 
@@ -214,7 +238,7 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
         pdu_dt = dt_by_id.get(pdu_end.get("placementId", ""))
         outlets = pdu_dt.get("outlets") if pdu_dt else None
         outlet = int(pdu_end.get("outlet") or 0)
-        if not outlets or outlet < 1 or outlet > int(outlets.get("count") or 0):
+        if not outlets or outlet < 1 or outlet > min(_count(outlets.get("count")), MAX_OUTLETS):
             plan.warnings.append(
                 f"power link {link.get('id', '')} skipped: outlet {outlet} has no importable termination on the PDU"
             )
@@ -245,11 +269,13 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
         if dt and pid in panel_touched and dt.get("ports"):
             sp = dt["ports"]
             # Size each rear port's fan-out first (NetBox rejects a front port whose position exceeds it).
+            n_front = _bounded(_front_count(sp), MAX_PORTS_PER_SIDE, "front ports", dev, plan.warnings)
+            n_rear = _bounded(_rear_count(sp), MAX_PORTS_PER_SIDE, "rear ports", dev, plan.warnings)
             rear_positions: dict[str, int] = {}
-            for i in range(1, int(sp.get("front") or 0) + 1):
+            for i in range(1, n_front + 1):
                 rp, pos = _front_rear_ref(sp, i)
                 rear_positions[rp] = max(rear_positions.get(rp, 0), pos)
-            for i in range(1, _rear_count(sp) + 1):
+            for i in range(1, n_rear + 1):
                 name = _rear_port_name(sp, i)
                 plan.rear_ports.append(
                     Component(
@@ -259,7 +285,7 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
                         positions=max(rear_positions.get(name, 0), 1),
                     )
                 )
-            for i in range(1, int(sp.get("front") or 0) + 1):
+            for i in range(1, n_front + 1):
                 rp, pos = _front_rear_ref(sp, i)
                 plan.front_ports.append(
                     Component(
@@ -276,7 +302,8 @@ def build_cabling_plan(project: Project, name_of: NameOf) -> CablingPlan:
                 plan.interfaces.append(Component(device=dev, name=nm, ctype=ifaces[nm]))
         if dt and pid in pdu_touched and dt.get("outlets"):
             outlets = dt["outlets"]
-            for i in range(1, int(outlets.get("count") or 0) + 1):
+            n_out = _bounded(_count(outlets.get("count")), MAX_OUTLETS, "outlets", dev, plan.warnings)
+            for i in range(1, n_out + 1):
                 plan.power_outlets.append(
                     Component(device=dev, name=_outlet_name(i), ctype=outlet_type(outlets.get("type", "")))
                 )

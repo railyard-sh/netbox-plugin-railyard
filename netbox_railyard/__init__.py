@@ -31,7 +31,7 @@ if PluginConfig is not None:
             "railyard_url": "https://railyard.sh",
             "railyard_token": "",
             "railyard_org": None,  # optional default org (id, slug or name)
-            "devicetype_library_ref": "master",  # pinned netbox-community/devicetype-library ref
+            "devicetype_library_ref": None,  # devicetype-library commit; None = the pinned DEFAULT_REF
             "devicetype_cache_dir": None,  # optional on-disk cache for fetched device-type YAML
         }
 

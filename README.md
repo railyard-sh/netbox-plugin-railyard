@@ -125,7 +125,7 @@ other way round.
 
 | Path | What | NetBox import? |
 |---|---|---|
-| [`railyard-sync`](https://github.com/railyard-sh/railyard-sync) (dependency) | Railyard API client, sync-document source adapter, canonical DiffSync models, importer, ownership tag, plan messages | **No** — shared with the `railyard-sync` CLI and the future Nautobot app |
+| [`railyard-sync`](https://github.com/railyard-sh/railyard-sync) (dependency) | Railyard API client, sync-document source adapter, canonical DiffSync models, importer, ownership tag, plan messages | **No** — shared with the `railyard-sync` CLI and the [Nautobot app](https://github.com/railyard-sh/nautobot-app-railyard) |
 | `netbox_railyard/policy.py` | Permissions per job, org/project allowlist, token loading | **No** — unit-tested here |
 | `netbox_railyard/target.py`, `devicetypes.py` | **Sync target** — ORM adapter + create/update/delete + ownership rules (the REST twin is `railyard_sync.export.netbox_rest`) | Yes |
 | `netbox_railyard/loader.py` | **Import source** — reads NetBox's ORM into a railyard-sync `Snapshot` | Yes |

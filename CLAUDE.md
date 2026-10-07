@@ -33,9 +33,9 @@ messages), make it in **railyard-sync** and bump the pin here; the plugin keeps 
 | `railyard_sync.importer.run.ImportRun` | the import flow (fetch + same-source check, build, merge, check, save) |
 | `railyard_sync.plans` | the 402 upgrade messages both jobs show |
 
-**The dependency is pinned to a git commit** in `pyproject.toml` (`railyard-sync @ git+https://…@<sha>`)
-until railyard-sync is on PyPI. `dev/setup.sh` reads the pin from there. When railyard-sync changes, push it,
-move the pin, and re-run the integration suite.
+**The dependency is pinned to a railyard-sync release tag** in `pyproject.toml`
+(`railyard-sync @ git+https://…@v0.2.1`) until railyard-sync is on PyPI. `dev/setup.sh` reads the pin from there.
+When railyard-sync changes, tag a release, move the pin, and re-run the integration suite.
 
 `netbox_railyard/__init__.py` guards `from netbox.plugins import PluginConfig` so `policy.py` imports (and is
 unit-tested) without NetBox.

@@ -1,33 +1,50 @@
-"""Sync policy decisions that don't need NetBox: which Railyard orgs and projects a sync may target,
-how the plugin's token is read, and whether the Railyard URL is safe to send it to.
+"""Policy decisions that don't need NetBox: the NetBox permissions each job needs, which Railyard orgs and
+projects a job may reach, and how the plugin's token is read.
 
-Kept free of Django/NetBox imports (like the ``railyard`` core) so it is unit-tested in ``tests/``;
-the NetBox glue (``forms``, ``views``, ``jobs``) calls into it and enforces the result.
+Kept free of Django/NetBox imports so it is unit-tested in ``tests/``; the NetBox glue (``forms``, ``views``,
+``jobs``) calls into it and enforces the result. The ownership tag (``ownership_tag``) and the clear-text URL
+check (``insecure_url``) are railyard-sync's, shared with its command-line export so both recognise the same
+objects; they are re-exported here.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from .railyard.mappings import slugify
+from railyard_sync.export.policy import TagSpec, insecure_url, instance_key, ownership_tag
+
+__all__ = [
+    "IMPORT_MODELS",
+    "SYNC_MODELS",
+    "SyncTargets",
+    "TagSpec",
+    "TargetNotAllowed",
+    "as_tuple",
+    "import_permissions",
+    "insecure_url",
+    "instance_key",
+    "missing_import_permissions",
+    "missing_permissions",
+    "ownership_tag",
+    "read_token",
+    "required_permissions",
+    "validate_estate_name",
+    "validate_project_ref",
+]
 
 #: A project id or URL slug. Railyard ids and slugs are ASCII words joined by ``-``/``_``/``.``.
 _PROJECT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$")
 
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
-
-
-#: The dcim models a sync reads and writes (``<app>.<action>_<model>`` permission codenames).
+#: The dcim models the Railyard → NetBox sync reads and writes (``<app>.<action>_<model>`` codenames).
 SYNC_MODELS = (
     "manufacturer",
     "devicetype",
     "devicerole",
     "site",
+    "location",
     "rack",
     "device",
     "interface",
@@ -63,6 +80,48 @@ def missing_permissions(has_perm, *, dry_run: bool, allow_deletes: bool) -> list
     return sorted(p for p in required_permissions(dry_run=dry_run, allow_deletes=allow_deletes) if not has_perm(p))
 
 
+#: The dcim models the NetBox → Railyard import reads (it writes nothing to NetBox).
+IMPORT_MODELS = (
+    "region",
+    "site",
+    "location",
+    "racktype",
+    "rack",
+    "manufacturer",
+    "devicetype",
+    "devicerole",
+    "device",
+    "interfacetemplate",
+    "frontporttemplate",
+    "rearporttemplate",
+    "powerporttemplate",
+    "poweroutlettemplate",
+    "consoleporttemplate",
+    "interface",
+    "frontport",
+    "rearport",
+    "portmapping",
+    "powerport",
+    "poweroutlet",
+    "consoleport",
+    "cable",
+    "powerpanel",
+    "powerfeed",
+)
+
+
+def import_permissions() -> frozenset[str]:
+    """The NetBox permissions a user needs to import into Railyard: ``view`` on everything the import reads.
+
+    The import only reads NetBox, so a dry run and a real run need the same; what the user may not view
+    (including object-level constraints) is simply not imported."""
+    return frozenset(f"dcim.view_{model}" for model in IMPORT_MODELS)
+
+
+def missing_import_permissions(has_perm) -> list[str]:
+    return sorted(p for p in import_permissions() if not has_perm(p))
+
+
 class TargetNotAllowed(ValueError):
     """The requested org or project is not one this NetBox is configured to sync from."""
 
@@ -87,6 +146,20 @@ def validate_project_ref(ref: str | None) -> str:
     text = (ref or "").strip()
     if not _PROJECT_REF_RE.match(text):
         raise TargetNotAllowed("Enter a Railyard project id or URL slug (letters, digits, '-', '_', '.' or '~').")
+    return text
+
+
+#: Railyard's limit on a project name.
+MAX_ESTATE_NAME = 200
+
+
+def validate_estate_name(name: str | None) -> str:
+    """A new estate's name: stripped, non-empty, at most ``MAX_ESTATE_NAME`` characters, no control characters."""
+    text = " ".join((name or "").split())
+    if not text:
+        raise TargetNotAllowed("Enter a name for the new Railyard estate.")
+    if len(text) > MAX_ESTATE_NAME:
+        raise TargetNotAllowed(f"An estate name has at most {MAX_ESTATE_NAME} characters.")
     return text
 
 
@@ -149,58 +222,3 @@ def read_token(token: str | None, token_file: str | None) -> str:
         except OSError as exc:
             raise ValueError(f"Can't read railyard_token_file {token_file!r}: {exc.strerror or exc}") from None
     return (token or "").strip()
-
-
-def insecure_url(url: str) -> bool:
-    """True when ``url`` would send the token in clear text (plain http to anything but loopback)."""
-    parts = urlsplit(url or "")
-    if parts.scheme == "https":
-        return False
-    return not (parts.scheme == "http" and (parts.hostname or "") in _LOOPBACK_HOSTS)
-
-
-# ---- ownership tag ------------------------------------------------------------------------------
-
-#: Written into the tag's description; its exact value is how the sync recognises its own tag.
-_TAG_MARKER = "railyard-sync:v1"
-
-
-@dataclass(frozen=True)
-class TagSpec:
-    """The NetBox tag that marks the objects one Railyard project (on one Railyard instance) owns."""
-
-    slug: str
-    name: str
-    description: str
-
-
-def instance_key(url: str) -> str:
-    """A stable identity for a Railyard instance: host[:port][/path], lower-cased, ignoring the scheme,
-    default ports and a trailing slash (so ``https://Railyard.sh/`` and ``http://railyard.sh`` match)."""
-    parts = urlsplit((url or "").strip())
-    host = (parts.hostname or "").lower()
-    port = parts.port
-    if port and port not in (80, 443):
-        host = f"{host}:{port}"
-    return host + parts.path.rstrip("/")
-
-
-def ownership_tag(base_url: str, project_id: str, project_name: str = "") -> TagSpec:
-    """The ownership tag for a project, keyed by the Railyard instance and the project's immutable id.
-
-    Two projects with the same name, or the same project id on two Railyard instances, get different
-    tags, so one sync can never treat another's objects as its own. The name carries a short digest for
-    the same reason (NetBox tag names are unique too) and follows project renames; the slug and the
-    description never change for a given project.
-    """
-    pid = (project_id or "").strip()
-    if not pid:
-        raise ValueError("The Railyard project document has no id, so its objects can't be tracked safely.")
-    instance = instance_key(base_url)
-    digest = hashlib.sha256(f"{instance}\n{pid}".encode()).hexdigest()
-    label = " ".join((project_name or pid).split())[:80]
-    return TagSpec(
-        slug=f"ry-{slugify(pid)[:60]}-{digest[:10]}",
-        name=f"RY:{label} ({digest[:8]})",
-        description=f"Managed by the Railyard sync. {_TAG_MARKER} project={pid} instance={instance}"[:200],
-    )

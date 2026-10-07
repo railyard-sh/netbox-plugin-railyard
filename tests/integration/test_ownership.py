@@ -10,6 +10,7 @@ from dcim.models import (
     FrontPort,
     Interface,
     InterfaceTemplate,
+    Location,
     Manufacturer,
     PortMapping,
     Rack,
@@ -21,7 +22,17 @@ from users.models import ObjectPermission
 
 from netbox_railyard.policy import ownership_tag
 
-from .base import SyncTestCase, project
+from .base import (
+    RAILYARD_URL,
+    SyncTestCase,
+    another_project,
+    creates,
+    document,
+    drop_all_devices,
+    drop_devices,
+    drop_racks,
+    row,
+)
 
 
 def operator_site(name="DC1", **kw):
@@ -41,17 +52,19 @@ class OwnershipTests(SyncTestCase):
         self.user = self.superuser()
 
     def tag(self, doc=None):
-        doc = doc or project()
-        return Tag.objects.get(slug=ownership_tag("https://railyard.example", doc["id"], doc["name"]).slug)
+        doc = doc or document()
+        return Tag.objects.get(slug=ownership_tag(RAILYARD_URL, doc["project"]["id"], doc["project"]["name"]).slug)
 
     def test_first_sync_creates_and_tags_everything(self):
-        result, _ = self.sync(dry_run=False)
-        self.assertEqual(result["diff"]["create"], 19)
+        result, job = self.sync(dry_run=False)
+        self.assertEqual(result["diff"]["create"], creates(document()), self.log(job))
         tag = self.tag()
         self.assertEqual(Device.objects.filter(tags=tag).count(), 3)
         self.assertEqual(Cable.objects.filter(tags=tag).count(), 2)
-        again, _ = self.sync(dry_run=False)
-        self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0)  # idempotent
+        self.assertEqual(Location.objects.get(tags=tag).name, "A")
+        self.assertEqual(Rack.objects.get(tags=tag).location.name, "A")
+        again, job = self.sync(dry_run=False)
+        self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0, self.log(job))  # idempotent
 
     def test_existing_shared_objects_are_used_but_never_tagged_or_changed(self):
         site = operator_site(status="planned")  # Railyard says "active"
@@ -101,16 +114,15 @@ class OwnershipTests(SyncTestCase):
         self.assertNotEqual(ours.pk, theirs.pk)
 
         # Railyard moves SW-1 up a unit: only the sync's SW-1 changes
-        doc = project()
-        doc["racks"][0]["placements"][0]["startU"] = 12
+        doc = document()
+        row(doc, "devices", name="SW-1")["position"] = "12"
         self.sync(doc, dry_run=False)
         ours.refresh_from_db(), theirs.refresh_from_db()
         self.assertEqual(ours.position, 12)
         self.assertIsNone(theirs.position)
 
         # Railyard drops SW-1: only the sync's SW-1 is deleted
-        doc["racks"][0]["placements"] = doc["racks"][0]["placements"][1:]
-        doc["cables"] = []
+        drop_devices(doc, "SW-1")
         result, job = self.sync(doc, dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertFalse(Device.objects.filter(pk=ours.pk).exists())
@@ -120,9 +132,7 @@ class OwnershipTests(SyncTestCase):
         self.sync(dry_run=False)
         ours = Device.objects.get(name="SW-1")
         ours.tags.clear()  # e.g. an operator takes it over by removing the tag
-        empty = project()
-        empty["racks"][0]["placements"] = []
-        empty["cables"], empty["powerLinks"] = [], []
+        empty = drop_all_devices(document())
         result, job = self.sync(empty, dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertTrue(Device.objects.filter(pk=ours.pk).exists())
@@ -134,10 +144,7 @@ class OwnershipTests(SyncTestCase):
         self.sync(dry_run=False)
         rack = Rack.objects.get(name="R1")
         theirs = operator_device("OPS-1", rack.site, rack=rack)
-        doc = project()
-        doc["racks"] = []
-        doc["cables"], doc["powerLinks"] = [], []
-        result, job = self.sync(doc, dry_run=False, allow_deletes=True)
+        result, job = self.sync(drop_racks(document()), dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertTrue(Device.objects.filter(pk=theirs.pk).exists())
         self.assertTrue(Rack.objects.filter(pk=rack.pk).exists())  # kept: it holds an operator device
@@ -152,10 +159,7 @@ class OwnershipTests(SyncTestCase):
         theirs = Interface.objects.create(device=other, name="eth0", type="1000base-t")
         cable = Cable(a_terminations=[mine], b_terminations=[theirs])
         cable.save()
-        doc = project()
-        doc["racks"][0]["placements"] = [p for p in doc["racks"][0]["placements"] if p["id"] != "p_srv"]
-        doc["cables"], doc["powerLinks"] = [], []
-        result, job = self.sync(doc, dry_run=False, allow_deletes=True)
+        result, job = self.sync(drop_devices(document(), "SRV-1"), dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertTrue(Device.objects.filter(pk=srv.pk).exists())
         self.assertTrue(Cable.objects.filter(pk=cable.pk).exists())
@@ -196,11 +200,9 @@ class OwnershipTests(SyncTestCase):
         self.assertTrue(Interface.objects.filter(device=sw, name="Eth48").exists())
 
     def test_projects_with_the_same_name_get_separate_tags(self):
-        a = project("prj_a", "Same name")
-        b = project("prj_b", "Same name")
-        b["dataCentres"][0]["name"] = "DC2"
-        for p in b["racks"][0]["placements"]:
-            p["label"] += "-B"
+        a = document()
+        a["project"].update(id="prj_a", name="Same name")
+        b = another_project(document(), "prj_b", "Same name", site="DC2", suffix="-B")
         self.sync(a, dry_run=False)
         self.sync(b, dry_run=False)
         tag_a, tag_b = self.tag(a), self.tag(b)
@@ -208,8 +210,7 @@ class OwnershipTests(SyncTestCase):
         self.assertEqual(Device.objects.filter(tags=tag_a).count(), 3)
 
         # mirroring project B (now empty) never deletes project A's objects
-        b["racks"], b["cables"], b["powerLinks"] = [], [], []
-        result, job = self.sync(b, dry_run=False, allow_deletes=True)
+        result, job = self.sync(drop_racks(b), dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertEqual(Device.objects.filter(tags=tag_a).count(), 3)
         self.assertFalse(Device.objects.filter(tags=tag_b).exists())
@@ -220,7 +221,7 @@ class OwnershipTests(SyncTestCase):
         self.assertEqual(Tag.objects.count(), 2)
 
     def test_a_lookalike_tag_is_refused(self):
-        spec = ownership_tag("https://railyard.example", "prj_it", "Integration")
+        spec = ownership_tag(RAILYARD_URL, "prj_it", "Integration")
         Tag.objects.create(slug=spec.slug, name="lookalike", description="someone else's")
         result, job = self.sync(dry_run=False)
         self.assertIsInstance(result, JobFailed)
@@ -246,42 +247,28 @@ class PatchPanelTests(SyncTestCase):
         self.user = self.superuser()
 
     def test_patch_panel_ports_and_mappings(self):
-        doc = project()
-        doc["catalogue"].append(
-            {
-                "key": "pp",
-                "manufacturer": "Acme",
-                "model": "PP24",
-                "uHeight": 1,
-                "ports": {"front": 2, "rear": 2, "passThrough": True, "media": "RJ45"},
-            }
-        )
-        doc["racks"][0]["placements"].append(
-            {
-                "id": "p_pp",
-                "startU": 20,
-                "heightU": 1,
-                "face": "front",
-                "label": "PP-1",
-                "deviceTypeRef": "pp",
-                "role": "patch",
-            }
-        )
-        doc["cables"].append(
-            {
-                "id": "c2",
-                "a": {"rackId": "r1", "placementId": "p_sw", "side": "front", "portIndex": 2},
-                "b": {"rackId": "r1", "placementId": "p_pp", "side": "front", "portIndex": 1},
-            }
-        )
+        doc = document("patch")
         result, job = self.sync(doc, dry_run=False)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertEqual(RearPort.objects.filter(device__name="PP-1").count(), 2)
         self.assertEqual(FrontPort.objects.filter(device__name="PP-1").count(), 2)
-        self.assertEqual(PortMapping.objects.filter(device__name="PP-1").count(), 2)
-        self.assertTrue(Cable.objects.filter(label__contains="PP-1").exists())
-        again, _ = self.sync(doc, dry_run=False)
-        self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0)
+        mapping = PortMapping.objects.get(device__name="PP-1", front_port__name="2")
+        self.assertEqual((mapping.rear_port.name, mapping.rear_port_position), ("2", 1))
+        front = FrontPort.objects.get(device__name="PP-1", name="1")
+        self.assertEqual(front.cable.a_terminations[0].name, "Eth2")
+        again, job = self.sync(doc, dry_run=False)
+        self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0, self.log(job))
+
+    def test_a_remapped_front_port_is_remapped_in_place(self):
+        doc = document("patch")
+        self.sync(doc, dry_run=False)
+        row(doc, "front-ports", device="PP-1", name="1")["rear_port"] = "2"
+        row(doc, "front-ports", device="PP-1", name="2")["rear_port"] = "1"
+        result, job = self.sync(doc, dry_run=False)
+        self.assertNotIsInstance(result, JobFailed, self.log(job))
+        self.assertEqual(result["diff"]["update"], 2, self.log(job))
+        mapping = PortMapping.objects.get(device__name="PP-1", front_port__name="1")
+        self.assertEqual(mapping.rear_port.name, "2")
 
 
 class DeleteConstraintTests(SyncTestCase):
@@ -299,10 +286,7 @@ class DeleteConstraintTests(SyncTestCase):
         perm.users.add(self.user)
         self.sync(dry_run=False)
 
-        doc = project()
-        doc["racks"][0]["placements"] = []
-        doc["cables"], doc["powerLinks"] = [], []
-        result, job = self.sync(doc, dry_run=False, allow_deletes=True)
+        result, job = self.sync(drop_all_devices(document()), dry_run=False, allow_deletes=True)
         self.assertNotIsInstance(result, JobFailed, self.log(job))
         self.assertFalse(Device.objects.filter(name="SRV-1").exists())
         self.assertTrue(Device.objects.filter(name="SW-1").exists())

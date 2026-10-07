@@ -140,39 +140,45 @@ def test_missing_permissions_lists_what_is_denied():
 
 # ---- ownership tag ----------------------------------------------------------
 
-from netbox_railyard.policy import instance_key, ownership_tag  # noqa: E402
+from railyard_sync.export import policy as shared  # noqa: E402
+
+from netbox_railyard import policy  # noqa: E402
 
 
-def test_tag_is_keyed_by_project_id_not_name():
-    a = ownership_tag("https://railyard.sh", "prj_a", "Same name")
-    b = ownership_tag("https://railyard.sh", "prj_b", "Same name")
-    assert a.slug != b.slug and a.name != b.name and a.description != b.description
+def test_the_ownership_tag_is_railyard_syncs():
+    # The plugin and `railyard-sync export netbox` must recognise each other's objects: one implementation.
+    assert policy.ownership_tag is shared.ownership_tag
+    assert policy.insecure_url is shared.insecure_url
 
 
-def test_tag_is_keyed_by_instance():
-    a = ownership_tag("https://railyard.sh", "prj_a", "X")
-    b = ownership_tag("https://railyard.example.com", "prj_a", "X")
-    assert a.slug != b.slug
+def test_the_ownership_tag_is_pinned():
+    # A change here orphans every object an earlier sync created.
+    spec = policy.ownership_tag("https://railyard.example", "prj_it", "Integration")
+    assert spec.slug.startswith("ry-prj-it-") and len(spec.slug) == len("ry-prj-it-") + 10
+    assert spec.name.startswith("RY:Integration (")
+    assert spec.description == "Managed by the Railyard sync. railyard-sync:v1 project=prj_it instance=railyard.example"
 
 
-def test_rename_changes_only_the_display_name():
-    a = ownership_tag("https://railyard.sh", "prj_a", "Old")
-    b = ownership_tag("https://railyard.sh", "prj_a", "New")
-    assert (a.slug, a.description) == (b.slug, b.description)
-    assert a.name != b.name
+# ---- import -----------------------------------------------------------------
+
+from netbox_railyard.policy import (  # noqa: E402
+    IMPORT_MODELS,
+    import_permissions,
+    missing_import_permissions,
+    validate_estate_name,
+)
 
 
-def test_tag_fits_netbox_limits():
-    spec = ownership_tag("https://" + "h" * 300 + ".example", "p" * 300, "n" * 300)
-    assert len(spec.slug) <= 100 and len(spec.name) <= 100 and len(spec.description) <= 200
+def test_import_needs_view_on_what_it_reads_and_nothing_else():
+    perms = import_permissions()
+    assert perms == {f"dcim.view_{m}" for m in IMPORT_MODELS}
+    assert {"dcim.view_site", "dcim.view_cable", "dcim.view_powerfeed", "dcim.view_interfacetemplate"} <= perms
+    assert missing_import_permissions(perms.__contains__) == []
+    assert "dcim.view_cable" in missing_import_permissions(lambda p: p != "dcim.view_cable")
 
 
-def test_instance_key_normalises_scheme_port_and_slash():
-    assert instance_key("https://Railyard.sh/") == instance_key("http://railyard.sh") == "railyard.sh"
-    assert instance_key("https://railyard.sh:443") == "railyard.sh"
-    assert instance_key("https://ry.local:8443/base/") == "ry.local:8443/base"
-
-
-def test_project_without_id_is_refused():
-    with pytest.raises(ValueError):
-        ownership_tag("https://railyard.sh", "", "Name only")
+def test_estate_names():
+    assert validate_estate_name("  LDN1   baseline ") == "LDN1 baseline"
+    for bad in ("", "   ", "x" * 201):
+        with pytest.raises(TargetNotAllowed):
+            validate_estate_name(bad)

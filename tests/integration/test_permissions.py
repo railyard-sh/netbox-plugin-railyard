@@ -7,7 +7,7 @@ from django.urls import reverse
 from extras.models import Tag
 from users.models import ObjectPermission
 
-from .base import APPLY, BOOTSTRAP, DELETE, VIEW, SyncTestCase, plugin_settings
+from .base import APPLY, BOOTSTRAP, DELETE, VIEW, SyncTestCase, creates, document, plugin_settings
 
 URL = "plugins:netbox_railyard:sync"
 
@@ -65,7 +65,7 @@ class JobPermissionTests(SyncTestCase):
         self.add_permissions(*VIEW)
         result, _ = self.sync(dry_run=True)
         self.assertNotIsInstance(result, JobFailed)
-        self.assertEqual(result["diff"]["create"], 19)
+        self.assertEqual(result["diff"]["create"], creates(document()))
 
     def test_apply_with_model_permissions(self):
         self.add_permissions(*APPLY, *DELETE, *BOOTSTRAP)

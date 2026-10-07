@@ -1,35 +1,37 @@
-"""The NetBox DiffSync *target* adapter.
+"""The NetBox DiffSync *target* adapter over NetBox's ORM.
 
-Each ``NetBox*`` model subclasses the canonical model in ``railyard.models`` (identical diff surface)
-and implements ``create``/``update``/``delete`` against the NetBox ORM (``dcim.models``).
+Each ``NetBox*`` model subclasses railyard-sync's canonical model (``railyard_sync.export.models``, the same
+diff surface the sync document is read into) and implements ``create``/``update``/``delete`` against the NetBox
+ORM (``dcim.models``). ``railyard_sync.export.netbox_rest`` applies the same rules over the REST API (the
+``railyard-sync export netbox`` command); what does not depend on the API is shared through
+``railyard_sync.export.ownership``. Keep the two in step.
 
 Ownership — what the sync will and won't touch:
 
-- **Owned objects** carry the project's ownership tag (``policy.ownership_tag``). ``load()`` reads back
-  only those, each remembering its NetBox primary key, and ``update``/``delete`` act only on that exact
+- **Owned objects** carry the project's ownership tag (``ownership_tag``). ``load()`` reads back only those,
+  each remembering its NetBox primary key (``nb_id``), and ``update``/``delete`` act only on that exact
   object, re-fetched by pk *and* tag. An object without the tag is never updated or deleted.
-- **Shared objects that already exist** (manufacturers, device types, roles, sites, racks) are *used*
-  as they are — a device may be placed in an existing site or rack — but never tagged, changed or
+- **Shared objects that already exist** (manufacturers, device types, roles, sites, locations, racks) are
+  *used* as they are — a device may be placed in an existing site or rack — but never tagged, changed or
   deleted.
-- **Conflicts** — a device of the same name already in the site, a component the sync didn't create, a
-  port that is already cabled — are reported and skipped, together with whatever depends on them. The
+- **Conflicts** — a device of the same name already in the site, a device type whose slug another type uses,
+  a port that is already cabled — are reported and skipped, together with whatever depends on them. The
   sync never adopts them.
-- **Components on a device the sync owns** that already exist by name (typically created from the
-  device type's component templates when the sync created the device) are adopted and tagged; they
-  are part of a device the sync created.
-- **Deletes** (opt-in) run in reverse dependency order and are refused — the object is kept and
-  reported — when NetBox would cascade to, or is protected by, anything the sync doesn't own. Deleting
-  an owned device removes its components with it, as NetBox always does.
+- **Components on a device the sync owns** that already exist by name (typically created from the device
+  type's component templates when the sync created the device) are adopted and tagged.
+- **Renames**: an owned device whose Railyard id (the ``railyard_id`` custom field) has another name in the
+  document is renamed in place, keeping its components, cables and history.
+- **Deletes** (opt-in) run in reverse dependency order and are refused — the object is kept and reported —
+  when NetBox would cascade to, or is protected by, anything the sync doesn't own. Deleting an owned device
+  removes its components with it, as NetBox always does.
 
-Every query is ``.restrict()``-ed to what the job's user may view/add/change/delete, so NetBox
-object-level permission constraints apply to the sync exactly as they would in the UI.
+Every query is ``.restrict()``-ed to what the job's user may view/add/change/delete, so NetBox object-level
+permission constraints apply to the sync exactly as they would in the UI.
 
 NetBox-only module — needs a live NetBox; exercised by ``tests/integration``.
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass, field
 
 from dcim.models import (
     Cable as NBCable,
@@ -42,6 +44,7 @@ from dcim.models import (
     FrontPort as NBFrontPort,
     Interface as NBInterface,
     InventoryItem,
+    Location as NBLocation,
     Manufacturer as NBManufacturer,
     ModuleBay,
     PortMapping as NBPortMapping,
@@ -57,13 +60,15 @@ from django.core.exceptions import FieldDoesNotExist, PermissionDenied
 from django.db import router
 from django.db.models import QuerySet
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
+from railyard_sync.export import models
+from railyard_sync.export.devicetype_library import DeviceTypeLibrary, DeviceTypeSpec
+from railyard_sync.export.mappings import slugify
+from railyard_sync.export.ownership import COMPONENT_TYPES, OwnershipMixin, OwnershipReport
 
 from . import devicetypes
-from .railyard import models
-from .railyard.devicetype_library import DeviceTypeSpec
-from .railyard.mappings import slugify
 
 CUSTOM_FIELD = "railyard_id"
+POWER_TYPES = {"dcim.powerport", "dcim.poweroutlet"}
 
 # cable-termination content type -> NetBox component model
 _CT_MODEL = {
@@ -82,6 +87,7 @@ _COMPONENT_TYPES = {
     "power_outlet": NBPowerOutlet,
     "power_port": NBPowerPort,
 }
+assert tuple(_COMPONENT_TYPES) == COMPONENT_TYPES
 
 # Every NetBox device component model: deleting an owned device takes all of these with it.
 _DEVICE_COMPONENTS = (
@@ -105,18 +111,6 @@ _BOOKKEEPING = {
     "dcim.cablepath",
     "dcim.portmapping",
 }
-
-
-@dataclass
-class OwnershipReport:
-    """What the sync decided about objects it doesn't own, for the job log and result."""
-
-    referenced: list[str] = field(default_factory=list)  # existing shared objects used as-is
-    conflicts: list[str] = field(default_factory=list)  # skipped: would need an object the sync doesn't own
-    dependents_skipped: int = 0  # components/cables skipped because what they hang off was skipped
-    adopted: list[str] = field(default_factory=list)  # components on owned devices brought under the tag
-    kept: list[str] = field(default_factory=list)  # deletes refused
-    warnings: list[str] = field(default_factory=list)
 
 
 # ---- lookups ---------------------------------------------------------------
@@ -146,6 +140,12 @@ def _find_device_type(manufacturer: str, model: str):
     return NBDeviceType.objects.filter(manufacturer=mfr, model=model).first() if mfr else None
 
 
+def _find_in_site(nb_model, site_name: str, name: str | None):
+    """A location or rack by name within the named site (``None`` when either is missing)."""
+    site = _find_site(site_name) if name else None
+    return nb_model.objects.filter(site=site, name=name).first() if site is not None else None
+
+
 def _is_tagged(obj, tag) -> bool:
     return tag is not None and obj.tags.filter(pk=tag.pk).exists()
 
@@ -156,11 +156,6 @@ def _taggable(nb_model) -> bool:
     except FieldDoesNotExist:
         return False
     return True
-
-
-def _set_railyard_id(obj, value: str) -> None:
-    if value:
-        obj.custom_field_data[CUSTOM_FIELD] = value
 
 
 def _ct_string(term) -> str:
@@ -192,7 +187,7 @@ def _owned(adapter, nb_model, action: str) -> QuerySet:
 def _get_owned(model, nb_model, action: str):
     """Re-fetch the NetBox object behind a loaded model by its pk *and* the ownership tag."""
     adapter = model.adapter
-    obj = _owned(adapter, nb_model, action).filter(pk=model.nb_pk).first() if model.nb_pk else None
+    obj = _owned(adapter, nb_model, action).filter(pk=model.nb_id).first() if model.nb_id else None
     if obj is None:
         raise PermissionDenied(
             f"{model.get_type()} {model.get_unique_id()}: no longer a Railyard-owned object that "
@@ -201,9 +196,9 @@ def _get_owned(model, nb_model, action: str):
     return obj
 
 
-def _claim(adapter, obj, action: str = "add") -> int:
-    """Tag a just-created (or adopted) object as owned, then check the user was allowed to."""
-    obj.tags.add(adapter.tag)
+def _claim(adapter, obj, action: str = "add", user_tags=None) -> int:
+    """Tag a just-created (or adopted) object as owned (plus its design tags), then check the user was allowed to."""
+    obj.tags.add(adapter.tag, *adapter.tags_for(user_tags))
     _require(adapter, obj, action)
     return obj.pk
 
@@ -212,20 +207,46 @@ def _visible(adapter, nb_model) -> QuerySet:
     return nb_model.objects.restrict(adapter.user, "view")
 
 
+def _visible_site(adapter, name: str):
+    found = _find_site(name)
+    return _visible(adapter, NBSite).filter(pk=found.pk).first() if found is not None else None
+
+
+def _visible_in_site(adapter, nb_model, site, name: str | None):
+    """An optional location/rack reference: ``None`` for a blank name; ``ObjectNotCreated`` when it is missing."""
+    if not name:
+        return None
+    obj = _visible(adapter, nb_model).filter(site=site, name=name).first()
+    if obj is None:
+        raise ObjectNotCreated(f"{nb_model._meta.verbose_name} {site}/{name} not found")
+    return obj
+
+
 def _owned_device(adapter, name: str):
     return _owned(adapter, NBDevice, "view").filter(name=name).first()
 
 
 def _created(cls, adapter, ids, attrs, pk):
     model = super(cls, cls).create(adapter, ids=ids, attrs=attrs)
-    model.nb_pk = pk
+    model.nb_id = pk
     return model
+
+
+def _save(adapter, obj, *, clean: bool = False) -> None:
+    """Save a changed owned object, then check the user may change it as it now is (object-level constraints).
+
+    ``clean`` runs NetBox's validation first (devices: a U position another device occupies, a rack in
+    another location)."""
+    if clean:
+        obj.full_clean()
+    obj.save()
+    _require(adapter, obj, "change")
 
 
 def _delete(model, nb_model):
     """Delete an owned object unless that would reach beyond what the sync owns (then keep it)."""
     adapter = model.adapter
-    obj = _owned(adapter, nb_model, "delete").filter(pk=model.nb_pk).first() if model.nb_pk else None
+    obj = _owned(adapter, nb_model, "delete").filter(pk=model.nb_id).first() if model.nb_id else None
     blockers = [f"{adapter.user} may not delete it"] if obj is None else adapter.deletion_blockers(obj)
     if blockers:
         adapter.report.kept.append(f"{model.get_type()} {model.get_unique_id()}: {'; '.join(blockers)}")
@@ -234,11 +255,20 @@ def _delete(model, nb_model):
     return True
 
 
+class _Deletes:
+    """``delete()`` for every target model: delete if safe, else keep and report."""
+
+    def delete(self):
+        _delete(self, _NB_MODEL[self.get_type()])
+        super().delete()
+        return self
+
+
 # ---- target models ---------------------------------------------------------
 
 
-class NetBoxManufacturer(models.Manufacturer):
-    nb_pk: int | None = None
+class NetBoxManufacturer(_Deletes, models.Manufacturer):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
@@ -253,18 +283,12 @@ class NetBoxManufacturer(models.Manufacturer):
         obj = _get_owned(self, NBManufacturer, "change")
         if attrs.get("slug"):
             obj.slug = attrs["slug"]
-        obj.save()
-        _require(self.adapter, obj, "change")
+        _save(self.adapter, obj)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBManufacturer)
-        super().delete()
-        return self
 
-
-class NetBoxDeviceType(models.DeviceType):
-    nb_pk: int | None = None
+class NetBoxDeviceType(_Deletes, models.DeviceType):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
@@ -280,6 +304,7 @@ class NetBoxDeviceType(models.DeviceType):
             u_height=attrs.get("u_height", 1),
             is_full_depth=attrs.get("is_full_depth", True),
             part_number=attrs.get("part_number", ""),
+            components=adapter.library_components(ids, attrs),
         )
         obj = devicetypes.create_device_type(spec, manufacturer, import_components=adapter.import_components)
         return _created(cls, adapter, ids, attrs, _claim(adapter, obj))
@@ -289,25 +314,21 @@ class NetBoxDeviceType(models.DeviceType):
         for name in ("slug", "u_height", "is_full_depth", "part_number"):
             if name in attrs:
                 setattr(obj, name, attrs[name])
-        obj.save()
-        _require(self.adapter, obj, "change")
+        _save(self.adapter, obj)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBDeviceType)
-        super().delete()
-        return self
 
-
-class NetBoxDeviceRole(models.DeviceRole):
-    nb_pk: int | None = None
+class NetBoxDeviceRole(_Deletes, models.DeviceRole):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
         if _find_role(ids["name"]) is not None:
             raise ObjectNotCreated(f"device role {ids['name']} already exists and is not managed by this sync")
         obj = NBDeviceRole(
-            name=ids["name"], slug=attrs.get("slug") or slugify(ids["name"]), color=attrs.get("color", "9e9e9e")
+            name=ids["name"],
+            slug=attrs.get("slug") or slugify(ids["name"]),
+            color=attrs.get("color") or "9e9e9e",
         )
         obj.full_clean()
         obj.save()
@@ -319,25 +340,22 @@ class NetBoxDeviceRole(models.DeviceRole):
             obj.slug = attrs["slug"]
         if attrs.get("color"):
             obj.color = attrs["color"]
-        obj.save()
-        _require(self.adapter, obj, "change")
+        _save(self.adapter, obj)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBDeviceRole)
-        super().delete()
-        return self
 
-
-class NetBoxSite(models.Site):
-    nb_pk: int | None = None
+class NetBoxSite(_Deletes, models.Site):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
         if _find_site(ids["name"]) is not None:
             raise ObjectNotCreated(f"site {ids['name']} already exists and is not managed by this sync")
         obj = NBSite(
-            name=ids["name"], slug=attrs.get("slug") or slugify(ids["name"]), status=attrs.get("status", "active")
+            name=ids["name"],
+            slug=attrs.get("slug") or slugify(ids["name"]),
+            status=attrs.get("status") or "active",
+            facility=attrs.get("facility", ""),
         )
         obj.full_clean()
         obj.save()
@@ -345,63 +363,89 @@ class NetBoxSite(models.Site):
 
     def update(self, attrs):
         obj = _get_owned(self, NBSite, "change")
-        if attrs.get("slug"):
-            obj.slug = attrs["slug"]
-        if attrs.get("status"):
-            obj.status = attrs["status"]
-        obj.save()
-        _require(self.adapter, obj, "change")
+        for name in ("slug", "status", "facility"):
+            if name in attrs:
+                setattr(obj, name, attrs[name])
+        _save(self.adapter, obj)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBSite)
-        super().delete()
-        return self
 
-
-class NetBoxRack(models.Rack):
-    nb_pk: int | None = None
+class NetBoxLocation(_Deletes, models.Location):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        site = _visible(adapter, NBSite).filter(pk=getattr(_find_site(ids["site"]), "pk", None)).first()
+        site = _visible_site(adapter, ids["site"])
         if site is None:
-            raise ObjectNotCreated(f"rack {ids['name']}: site {ids['site']} not found")
-        if NBRack.objects.filter(site=site, name=ids["name"]).exists():
-            raise ObjectNotCreated(f"rack {ids['name']} already exists and is not managed by this sync")
-        obj = NBRack(
+            raise ObjectNotCreated(f"location {ids['name']}: site {ids['site']} not found")
+        if NBLocation.objects.filter(site=site, name=ids["name"]).exists():
+            raise ObjectNotCreated(f"location {ids['name']} already exists and is not managed by this sync")
+        obj = NBLocation(
             site=site,
+            parent=_visible_in_site(adapter, NBLocation, site, attrs.get("parent")),
             name=ids["name"],
-            status=attrs.get("status", "active"),
-            width=attrs.get("width", 19),
-            u_height=attrs.get("u_height", 42),
-            desc_units=attrs.get("desc_units", False),
+            slug=attrs.get("slug") or slugify(ids["name"]),
+            status=attrs.get("status") or "active",
+            facility=attrs.get("facility", ""),
         )
         obj.full_clean()
         obj.save()
         return _created(cls, adapter, ids, attrs, _claim(adapter, obj))
 
     def update(self, attrs):
-        obj = _get_owned(self, NBRack, "change")
-        for name in ("status", "width", "u_height", "desc_units"):
+        obj = _get_owned(self, NBLocation, "change")
+        for name in ("slug", "status", "facility"):
             if name in attrs:
                 setattr(obj, name, attrs[name])
-        obj.save()
-        _require(self.adapter, obj, "change")
+        if "parent" in attrs:
+            obj.parent = _visible_in_site(self.adapter, NBLocation, obj.site, attrs["parent"])
+        _save(self.adapter, obj)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBRack)
-        super().delete()
-        return self
 
-
-class NetBoxDevice(models.Device):
-    nb_pk: int | None = None
+class NetBoxRack(_Deletes, models.Rack):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        site = _visible(adapter, NBSite).filter(pk=getattr(_find_site(attrs["site"]), "pk", None)).first()
+        site = _visible_site(adapter, ids["site"])
+        if site is None:
+            raise ObjectNotCreated(f"rack {ids['name']}: site {ids['site']} not found")
+        if NBRack.objects.filter(site=site, name=ids["name"]).exists():
+            raise ObjectNotCreated(f"rack {ids['name']} already exists and is not managed by this sync")
+        obj = NBRack(
+            site=site,
+            location=_visible_in_site(adapter, NBLocation, site, attrs.get("location")),
+            name=ids["name"],
+            status=attrs.get("status") or "active",
+            width=attrs.get("width", 19),
+            u_height=attrs.get("u_height", 42),
+            desc_units=attrs.get("desc_units", False),
+            comments=attrs.get("comments", ""),
+        )
+        obj.full_clean()
+        obj.save()
+        return _created(cls, adapter, ids, attrs, _claim(adapter, obj, user_tags=attrs.get("tags")))
+
+    def update(self, attrs):
+        obj = _get_owned(self, NBRack, "change")
+        for name in ("status", "width", "u_height", "desc_units", "comments"):
+            if name in attrs:
+                setattr(obj, name, attrs[name])
+        if "location" in attrs:
+            obj.location = _visible_in_site(self.adapter, NBLocation, obj.site, attrs["location"])
+        _save(self.adapter, obj)
+        if "tags" in attrs:
+            self.adapter.set_tags(obj, attrs["tags"])
+        return super().update(attrs)
+
+
+class NetBoxDevice(_Deletes, models.Device):
+    nb_id: int | None = None
+
+    @classmethod
+    def create(cls, adapter, ids, attrs):
+        site = _visible_site(adapter, attrs["site"])
         if site is None:
             raise ObjectNotCreated(f"device {ids['name']}: site {attrs['site']} not found")
         if NBDevice.objects.filter(site=site, name__iexact=ids["name"]).exists():
@@ -416,42 +460,55 @@ class NetBoxDevice(models.Device):
             device_type=device_type,
             role=role,
             site=site,
+            location=_visible_in_site(adapter, NBLocation, site, attrs.get("location")),
             rack=rack,
             position=attrs.get("position"),
             face=attrs.get("face") or "",
-            status=attrs.get("status", "active"),
+            status=attrs.get("status") or "active",
+            serial=attrs.get("serial", ""),
+            comments=attrs.get("comments", ""),
         )
-        _set_railyard_id(device, attrs.get("railyard_id", ""))
+        if attrs.get("railyard_id"):
+            device.custom_field_data[CUSTOM_FIELD] = attrs["railyard_id"]
         device.full_clean()  # e.g. refuses a position another device already occupies
         device.save()
-        return _created(cls, adapter, ids, attrs, _claim(adapter, device))
+        return _created(cls, adapter, ids, attrs, _claim(adapter, device, user_tags=attrs.get("tags")))
 
     def update(self, attrs):
         obj = _get_owned(self, NBDevice, "change")
         if "role" in attrs:
             obj.role = _find_role(attrs["role"])
-        if "rack" in attrs:
-            obj.rack = NBRack.objects.filter(site=obj.site, name=attrs["rack"]).first() if attrs["rack"] else None
-        for name in ("position", "face", "status"):
+        if "device_type" in attrs or "manufacturer" in attrs:
+            device_type = _find_device_type(
+                attrs.get("manufacturer", self.manufacturer), attrs.get("device_type", self.device_type)
+            )
+            if device_type is None:
+                raise PermissionDenied(f"device {self.name}: device type {attrs.get('device_type')} not found")
+            obj.device_type = device_type
+        if "site" in attrs:
+            obj.site = _visible_site(self.adapter, attrs["site"])
+        if "rack" in attrs or "site" in attrs:
+            rack = attrs.get("rack", self.rack)
+            obj.rack = NBRack.objects.filter(site=obj.site, name=rack).first() if rack else None
+        if "location" in attrs or "site" in attrs:
+            obj.location = _visible_in_site(self.adapter, NBLocation, obj.site, attrs.get("location", self.location))
+        for name in ("position", "face", "status", "serial", "comments"):
             if name in attrs:
                 setattr(obj, name, attrs[name])
+        if "position" in attrs and attrs["position"] is None:
+            obj.face = ""  # a device without a U position has no face
         if "railyard_id" in attrs:
-            _set_railyard_id(obj, attrs["railyard_id"])
-        obj.full_clean()
-        obj.save()
-        _require(self.adapter, obj, "change")
+            obj.custom_field_data[CUSTOM_FIELD] = attrs["railyard_id"] or None
+        _save(self.adapter, obj, clean=True)
+        if "tags" in attrs:
+            self.adapter.set_tags(obj, attrs["tags"])
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBDevice)
-        super().delete()
-        return self
 
-
-# Helpers for the simple (device, name, type) components. Module functions rather than a mixin with an
-# `_nb_model` class attribute, because DiffSyncModel is Pydantic and would treat that attribute as a
-# private attribute (so it wouldn't resolve on the subclass).
-def _ensure_component(adapter, nb_model, ids, attrs, **defaults):
+# Helpers for the (device, name, type) components. Module functions rather than a mixin with an `_nb_model`
+# class attribute, because DiffSyncModel is Pydantic and would treat that attribute as a private attribute
+# (so it wouldn't resolve on the subclass).
+def _ensure_component(adapter, nb_model, ids, **defaults):
     """Create a component on a device the sync owns, or adopt a same-named one already on it."""
     device = _owned_device(adapter, ids["device"])
     if device is None:
@@ -474,120 +531,109 @@ def _ensure_component(adapter, nb_model, ids, attrs, **defaults):
     return obj, _claim(adapter, obj, "change")
 
 
-def _update_component(model, nb_model, attrs):
+def _update_component(model, nb_model, attrs, fields=("type",)):
     obj = _get_owned(model, nb_model, "change")
-    if "type" in attrs:
-        obj.type = attrs["type"]
-        obj.save()
-        _require(model.adapter, obj, "change")
+    for name in fields:
+        if name in attrs:
+            setattr(obj, name, attrs[name])
+    _save(model.adapter, obj)
+    return obj
 
 
-class NetBoxInterface(models.Interface):
-    nb_pk: int | None = None
+class NetBoxInterface(_Deletes, models.Interface):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        _, pk = _ensure_component(adapter, NBInterface, ids, attrs, type=attrs.get("type", "other"))
+        _, pk = _ensure_component(adapter, NBInterface, ids, type=attrs.get("type") or "other")
         return _created(cls, adapter, ids, attrs, pk)
 
     def update(self, attrs):
         _update_component(self, NBInterface, attrs)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBInterface)
-        super().delete()
-        return self
 
-
-class NetBoxRearPort(models.RearPort):
-    nb_pk: int | None = None
+class NetBoxRearPort(_Deletes, models.RearPort):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
         _, pk = _ensure_component(
-            adapter, NBRearPort, ids, attrs, type=attrs.get("type", "8p8c"), positions=attrs.get("positions", 1)
+            adapter, NBRearPort, ids, type=attrs.get("type") or "8p8c", positions=attrs.get("positions", 1)
         )
         return _created(cls, adapter, ids, attrs, pk)
 
     def update(self, attrs):
-        obj = _get_owned(self, NBRearPort, "change")
-        if "type" in attrs:
-            obj.type = attrs["type"]
-        if "positions" in attrs:
-            obj.positions = attrs["positions"]
-        obj.save()
-        _require(self.adapter, obj, "change")
+        _update_component(self, NBRearPort, attrs, ("type", "positions"))
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBRearPort)
-        super().delete()
-        return self
+
+def _map_front_port(adapter, fp, rear_name: str, rear_position: int, *, replace: bool) -> None:
+    """Couple a front port to its rear port through a ``PortMapping`` row (NetBox 4.5+ has no rear_port FK).
+
+    A new or adopted front port is mapped only when it has no mapping yet; ``replace`` re-maps an owned one."""
+    rear = _owned(adapter, NBRearPort, "view").filter(device=fp.device, name=rear_name).first() if rear_name else None
+    if rear is None:
+        return
+    mappings = NBPortMapping.objects.filter(front_port=fp)
+    if mappings.exists():
+        if not replace:
+            return
+        mappings.delete()
+    if replace:
+        # Ports swapped in Railyard: the rear position is still held by another owned front port, which this
+        # run re-maps too. (One the sync doesn't own keeps it, and the sync fails and rolls back.)
+        NBPortMapping.objects.filter(
+            rear_port=rear, rear_port_position=rear_position, front_port__tags=adapter.tag
+        ).delete()
+    NBPortMapping.objects.create(
+        device=fp.device, front_port=fp, front_port_position=1, rear_port=rear, rear_port_position=rear_position
+    )
 
 
-class NetBoxFrontPort(models.FrontPort):
-    nb_pk: int | None = None
+class NetBoxFrontPort(_Deletes, models.FrontPort):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        fp, pk = _ensure_component(adapter, NBFrontPort, ids, attrs, type=attrs.get("type", "8p8c"), positions=1)
-        # NetBox 4.6 couples a front port to a rear port through a PortMapping row, not a rear_port FK.
-        rear = _owned(adapter, NBRearPort, "view").filter(device=fp.device, name=attrs.get("rear_port")).first()
-        if rear is not None and not fp.mappings.exists():
-            NBPortMapping.objects.create(
-                device=fp.device,
-                front_port=fp,
-                front_port_position=1,
-                rear_port=rear,
-                rear_port_position=attrs.get("rear_port_position", 1),
-            )
+        fp, pk = _ensure_component(adapter, NBFrontPort, ids, type=attrs.get("type") or "8p8c", positions=1)
+        _map_front_port(adapter, fp, attrs.get("rear_port", ""), attrs.get("rear_port_position", 1), replace=False)
         return _created(cls, adapter, ids, attrs, pk)
 
     def update(self, attrs):
-        _update_component(self, NBFrontPort, attrs)
+        fp = _update_component(self, NBFrontPort, attrs)
+        if "rear_port" in attrs or "rear_port_position" in attrs:
+            rear = attrs.get("rear_port", self.rear_port)
+            _map_front_port(
+                self.adapter, fp, rear, attrs.get("rear_port_position", self.rear_port_position), replace=True
+            )
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBFrontPort)
-        super().delete()
-        return self
 
-
-class NetBoxPowerOutlet(models.PowerOutlet):
-    nb_pk: int | None = None
+class NetBoxPowerOutlet(_Deletes, models.PowerOutlet):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        _, pk = _ensure_component(adapter, NBPowerOutlet, ids, attrs, type=attrs.get("type", ""))
+        _, pk = _ensure_component(adapter, NBPowerOutlet, ids, type=attrs.get("type") or "iec-60320-c13")
         return _created(cls, adapter, ids, attrs, pk)
 
     def update(self, attrs):
         _update_component(self, NBPowerOutlet, attrs)
         return super().update(attrs)
 
-    def delete(self):
-        _delete(self, NBPowerOutlet)
-        super().delete()
-        return self
 
-
-class NetBoxPowerPort(models.PowerPort):
-    nb_pk: int | None = None
+class NetBoxPowerPort(_Deletes, models.PowerPort):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
-        _, pk = _ensure_component(adapter, NBPowerPort, ids, attrs, type=attrs.get("type", ""))
+        _, pk = _ensure_component(adapter, NBPowerPort, ids, type=attrs.get("type") or "iec-60320-c14")
         return _created(cls, adapter, ids, attrs, pk)
 
     def update(self, attrs):
         _update_component(self, NBPowerPort, attrs)
         return super().update(attrs)
-
-    def delete(self):
-        _delete(self, NBPowerPort)
-        super().delete()
-        return self
 
 
 def _owned_termination(adapter, device_name: str, ct: str, name: str):
@@ -599,8 +645,8 @@ def _owned_termination(adapter, device_name: str, ct: str, name: str):
     return model.objects.filter(device=device, name=name).first()
 
 
-class NetBoxCable(models.Cable):
-    nb_pk: int | None = None
+class NetBoxCable(_Deletes, models.Cable):
+    nb_id: int | None = None
 
     @classmethod
     def create(cls, adapter, ids, attrs):
@@ -611,9 +657,12 @@ class NetBoxCable(models.Cable):
         for end in (a, b):
             if end.cable_id:
                 raise ObjectNotCreated(f"cable {attrs.get('label') or ids}: {end.device}:{end} is already cabled")
-        cable = NBCable(status="connected", label=attrs.get("label", ""))
-        if attrs.get("is_power"):
-            cable.type = "power"
+        cable = NBCable(
+            status=attrs.get("status") or "connected",
+            label=attrs.get("label", ""),
+            type=attrs.get("type") or ("power" if attrs.get("is_power") else ""),
+            color=attrs.get("color", ""),
+        )
         cable.a_terminations = [a]
         cable.b_terminations = [b]
         cable.save()
@@ -621,28 +670,23 @@ class NetBoxCable(models.Cable):
 
     def update(self, attrs):
         cable = _get_owned(self, NBCable, "change")
-        if "label" in attrs:
-            cable.label = attrs["label"]
-        if attrs.get("is_power"):
-            cable.type = "power"
+        for name in ("label", "status", "color", "type"):
+            if name in attrs:
+                setattr(cable, name, attrs[name])
         cable.save()
         _require(self.adapter, cable, "change")
         return super().update(attrs)
-
-    def delete(self):
-        _delete(self, NBCable)
-        super().delete()
-        return self
 
 
 # ---- adapter ---------------------------------------------------------------
 
 
-class NetBoxAdapter(Adapter):
+class NetBoxAdapter(OwnershipMixin, Adapter):
     manufacturer = NetBoxManufacturer
     device_type = NetBoxDeviceType
     device_role = NetBoxDeviceRole
     site = NetBoxSite
+    location = NetBoxLocation
     rack = NetBoxRack
     device = NetBoxDevice
     interface = NetBoxInterface
@@ -654,12 +698,54 @@ class NetBoxAdapter(Adapter):
 
     top_level = models.TOP_LEVEL
 
-    def __init__(self, *, tag, user, import_components: bool = False, **kwargs):
+    def __init__(
+        self,
+        *,
+        tag,
+        user,
+        user_tags: dict | None = None,
+        import_components: bool = False,
+        devicetype_library: DeviceTypeLibrary | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.tag = tag  # None before the first real sync: nothing is owned yet
         self.user = user
+        self.user_tags = dict(user_tags or {})  # design tag slug -> NetBox Tag
         self.import_components = import_components
+        self.dtl = devicetype_library
+        self.source: Adapter | None = None
         self.report = OwnershipReport()
+        self.renames: list[tuple[str, str, int]] = []  # (old name, new name, NetBox pk)
+
+    # -- tags and device types ---------------------------------------------------
+
+    def tags_for(self, user_slugs) -> list:
+        """The design tags an owned object carries, of those that exist in NetBox."""
+        return [self.user_tags[s] for s in user_slugs or [] if s in self.user_tags]
+
+    def set_tags(self, obj, user_slugs) -> None:
+        """An owned object's tags: the ownership tag plus exactly its design tags."""
+        obj.tags.set([self.tag, *self.tags_for(user_slugs)])
+
+    def _user_tags(self, obj) -> list[str]:
+        return sorted(t.slug for t in obj.tags.all() if self.tag is None or t.pk != self.tag.pk)
+
+    def library_components(self, ids: dict, attrs: dict) -> dict:
+        """A new device type's component templates from the devicetype-library, when ``import_components``."""
+        if not self.import_components or self.dtl is None:
+            return {}
+        src = self.source.get_or_none("device_type", ids) if self.source is not None else None
+        spec = self.dtl.resolve(
+            {
+                "manufacturer": ids["manufacturer"],
+                "model": ids["model"],
+                "uHeight": attrs.get("u_height", 1),
+                "fullDepth": attrs.get("is_full_depth", True),
+                "key": getattr(src, "library_slug", "") or attrs.get("slug", ""),
+            }
+        )
+        return spec.components
 
     # -- load -----------------------------------------------------------------
 
@@ -669,7 +755,7 @@ class NetBoxAdapter(Adapter):
         except ObjectAlreadyExists:
             self.report.warnings.append(
                 f"two Railyard-owned objects share the identity {model.get_type()} {model.get_unique_id()}; "
-                f"NetBox #{model.nb_pk} is ignored (neither updated nor deleted)"
+                f"NetBox #{model.nb_id} is ignored (neither updated nor deleted)"
             )
 
     def load(self) -> None:
@@ -680,7 +766,7 @@ class NetBoxAdapter(Adapter):
             return _owned(self, nb_model, "view")
 
         for mfr in owned(NBManufacturer):
-            self._add(self.manufacturer(name=mfr.name, slug=mfr.slug, nb_pk=mfr.pk))
+            self._add(self.manufacturer(name=mfr.name, slug=mfr.slug, nb_id=mfr.pk))
         for dt in owned(NBDeviceType).select_related("manufacturer"):
             self._add(
                 self.device_type(
@@ -690,14 +776,28 @@ class NetBoxAdapter(Adapter):
                     u_height=int(dt.u_height or 0),
                     is_full_depth=dt.is_full_depth,
                     part_number=dt.part_number or "",
-                    nb_pk=dt.pk,
+                    nb_id=dt.pk,
                 )
             )
         for role in owned(NBDeviceRole):
-            self._add(self.device_role(name=role.name, slug=role.slug, color=role.color, nb_pk=role.pk))
+            self._add(self.device_role(name=role.name, slug=role.slug, color=role.color, nb_id=role.pk))
         for site in owned(NBSite):
-            self._add(self.site(name=site.name, slug=site.slug, status=site.status, nb_pk=site.pk))
-        for rk in owned(NBRack).select_related("site"):
+            self._add(
+                self.site(name=site.name, slug=site.slug, status=site.status, facility=site.facility, nb_id=site.pk)
+            )
+        for loc in owned(NBLocation).select_related("site", "parent"):
+            self._add(
+                self.location(
+                    site=loc.site.name,
+                    name=loc.name,
+                    slug=loc.slug,
+                    parent=loc.parent.name if loc.parent else "",
+                    status=loc.status,
+                    facility=loc.facility or "",
+                    nb_id=loc.pk,
+                )
+            )
+        for rk in owned(NBRack).select_related("site", "location").prefetch_related("tags"):
             self._add(
                 self.rack(
                     site=rk.site.name,
@@ -706,10 +806,14 @@ class NetBoxAdapter(Adapter):
                     width=int(rk.width),
                     u_height=int(rk.u_height),
                     desc_units=rk.desc_units,
-                    nb_pk=rk.pk,
+                    location=rk.location.name if rk.location else "",
+                    comments=rk.comments or "",
+                    tags=self._user_tags(rk),
+                    nb_id=rk.pk,
                 )
             )
-        for dev in owned(NBDevice).select_related("device_type__manufacturer", "role", "site", "rack"):
+        devices = owned(NBDevice).select_related("device_type__manufacturer", "role", "site", "rack", "location")
+        for dev in devices.prefetch_related("tags"):
             self._add(
                 self.device(
                     name=dev.name,
@@ -721,17 +825,22 @@ class NetBoxAdapter(Adapter):
                     position=int(dev.position) if dev.position is not None else None,
                     face=dev.face or "",
                     status=dev.status,
-                    railyard_id=(dev.custom_field_data or {}).get(CUSTOM_FIELD, "") or "",
-                    nb_pk=dev.pk,
+                    railyard_id=str((dev.custom_field_data or {}).get(CUSTOM_FIELD) or ""),
+                    serial=dev.serial or "",
+                    location=dev.location.name if dev.location else "",
+                    comments=dev.comments or "",
+                    tags=self._user_tags(dev),
+                    nb_id=dev.pk,
                 )
             )
 
         for rp in owned(NBRearPort).select_related("device"):
             self._add(
-                self.rear_port(device=rp.device.name, name=rp.name, type=rp.type, positions=rp.positions, nb_pk=rp.pk)
+                self.rear_port(device=rp.device.name, name=rp.name, type=rp.type, positions=rp.positions, nb_id=rp.pk)
             )
         for fp in owned(NBFrontPort).select_related("device").prefetch_related("mappings__rear_port"):
-            mapping = fp.mappings.first()
+            mappings = sorted(fp.mappings.all(), key=lambda m: m.front_port_position)
+            mapping = mappings[0] if mappings else None
             self._add(
                 self.front_port(
                     device=fp.device.name,
@@ -739,15 +848,15 @@ class NetBoxAdapter(Adapter):
                     type=fp.type,
                     rear_port=mapping.rear_port.name if mapping else "",
                     rear_port_position=mapping.rear_port_position if mapping else 1,
-                    nb_pk=fp.pk,
+                    nb_id=fp.pk,
                 )
             )
         for iface in owned(NBInterface).select_related("device"):
-            self._add(self.interface(device=iface.device.name, name=iface.name, type=iface.type, nb_pk=iface.pk))
+            self._add(self.interface(device=iface.device.name, name=iface.name, type=iface.type, nb_id=iface.pk))
         for po in owned(NBPowerOutlet).select_related("device"):
-            self._add(self.power_outlet(device=po.device.name, name=po.name, type=po.type, nb_pk=po.pk))
+            self._add(self.power_outlet(device=po.device.name, name=po.name, type=po.type, nb_id=po.pk))
         for pp in owned(NBPowerPort).select_related("device"):
-            self._add(self.power_port(device=pp.device.name, name=pp.name, type=pp.type, nb_pk=pp.pk))
+            self._add(self.power_port(device=pp.device.name, name=pp.name, type=pp.type, nb_id=pp.pk))
         for cable in owned(NBCable):
             a_terms, b_terms = cable.a_terminations, cable.b_terminations
             if len(a_terms) != 1 or len(b_terms) != 1:
@@ -755,17 +864,21 @@ class NetBoxAdapter(Adapter):
             a, b = a_terms[0], b_terms[0]
             if getattr(a, "device", None) is None or getattr(b, "device", None) is None:
                 continue
+            a_type, b_type = _ct_string(a), _ct_string(b)
             self._add(
                 self.cable(
                     a_device=a.device.name,
-                    a_type=_ct_string(a),
+                    a_type=a_type,
                     a_name=a.name,
                     b_device=b.device.name,
-                    b_type=_ct_string(b),
+                    b_type=b_type,
                     b_name=b.name,
-                    is_power=(cable.type == "power"),
+                    is_power=cable.type == "power" or bool({a_type, b_type} & POWER_TYPES),
                     label=cable.label or "",
-                    nb_pk=cable.pk,
+                    type=cable.type or "",
+                    status=cable.status,
+                    color=(cable.color or "").lower(),
+                    nb_id=cable.pk,
                 )
             )
 
@@ -774,13 +887,20 @@ class NetBoxAdapter(Adapter):
     def _owns(self, model) -> bool:
         return self.get_or_none(model.get_type(), model.get_unique_id()) is not None
 
+    def device_named(self, site: str, name: str) -> int | None:
+        nb_site = _find_site(site)
+        found = NBDevice.objects.filter(site=nb_site, name__iexact=name).first() if nb_site else None
+        return found.pk if found else None
+
     def reconcile(self, source, *, allow_deletes: bool = False) -> OwnershipReport:
         """Decide, before anything is written, what to do about Railyard objects that the sync doesn't
         own yet but that already exist in NetBox; drop from ``source`` everything it must not create.
 
-        Read-only, so a dry run reports exactly what a real run will skip or use as-is.
+        Read-only, so a dry run reports exactly what a real run will skip, rename or use as-is.
         """
+        self.source = source
         report = self.report
+        self.detect_renames(source)
         drop: list = []
         skipped_types: set[tuple[str, str]] = set()
         skipped_devices: set[str] = set()
@@ -815,10 +935,19 @@ class NetBoxAdapter(Adapter):
         for site in new("site"):
             if _find_site(site.name) is not None:
                 reference(site, f"site {site.name}")
+        for loc in new("location"):
+            if _find_in_site(NBLocation, loc.site, loc.name) is not None:
+                reference(loc, f"location {loc.site}/{loc.name}")
         for rack in new("rack"):
-            nb_site = _find_site(rack.site)
-            if nb_site is not None and NBRack.objects.filter(site=nb_site, name=rack.name).exists():
+            if _find_in_site(NBRack, rack.site, rack.name) is not None:
                 reference(rack, f"rack {rack.site}/{rack.name}")
+        # NetBox puts a racked device in its rack's location; in a rack used as-is that is the rack's real
+        # location, which need not be the one Railyard drew.
+        used_as_is = {(r.site, r.name) for r in drop if r.get_type() == "rack"}
+        for dev in source.get_all("device"):
+            if dev.rack and (dev.site, dev.rack) in used_as_is:
+                nb_rack = _find_in_site(NBRack, dev.site, dev.rack)
+                dev.location = nb_rack.location.name if nb_rack.location else ""
 
         for dev in new("device"):
             if (dev.manufacturer, dev.device_type) in skipped_types:
@@ -845,9 +974,9 @@ class NetBoxAdapter(Adapter):
                     drop.append(comp)
                     continue
                 owner = self.get_or_none("device", comp.device)
-                if owner is None or owner.nb_pk is None:
+                if owner is None or owner.nb_id is None:
                     continue  # its device is created by this run, so the component can't exist yet
-                existing = nb_model.objects.filter(device_id=owner.nb_pk, name=comp.name).first()
+                existing = nb_model.objects.filter(device_id=owner.nb_id, name=comp.name).first()
                 if existing is not None and _is_tagged(existing, self.tag):
                     skipped_ends.add((comp.device, ct, comp.name))
                     conflict(comp, f"{type_name} {comp.device}:{comp.name} is managed by this sync but not visible")
@@ -855,7 +984,7 @@ class NetBoxAdapter(Adapter):
                     report.adopted.append(f"{nb_model._meta.verbose_name} {comp.device}:{comp.name}")
 
         doomed_cables = (
-            {c.nb_pk for c in self.get_all("cable") if source.get_or_none("cable", c.get_unique_id()) is None}
+            {c.nb_id for c in self.get_all("cable") if source.get_or_none("cable", c.get_unique_id()) is None}
             if allow_deletes
             else set()
         )
@@ -868,9 +997,9 @@ class NetBoxAdapter(Adapter):
             for dev_name, ct, name in ends:
                 owner = self.get_or_none("device", dev_name)
                 nb_model = _CT_MODEL.get(ct)
-                if owner is None or owner.nb_pk is None or nb_model is None:
+                if owner is None or owner.nb_id is None or nb_model is None:
                     continue
-                term = nb_model.objects.filter(device_id=owner.nb_pk, name=name).first()
+                term = nb_model.objects.filter(device_id=owner.nb_id, name=name).first()
                 if term is not None and term.cable_id and term.cable_id not in doomed_cables:
                     conflict(cab, f"cable {cab.label or cab.get_unique_id()}: {dev_name}:{name} is already cabled")
                     break
@@ -879,20 +1008,22 @@ class NetBoxAdapter(Adapter):
             source.remove(model)
         return report
 
-    # -- deletes --------------------------------------------------------------
+    def apply_renames(self) -> None:
+        """Rename the NetBox devices ``reconcile`` found renamed in Railyard (a real run only)."""
+        for old, new, pk in self.renames:
+            obj = _owned(self, NBDevice, "change").filter(pk=pk).first()
+            if obj is None:
+                raise PermissionDenied(f"device {old}: no longer a Railyard-owned device that {self.user} may change")
+            obj.name = new
+            _save(self, obj, clean=True)
 
-    def delete_candidates(self, source) -> list:
-        """Owned objects no longer in Railyard, in a safe deletion order (dependents first)."""
-        out = []
-        for type_name in reversed(self.top_level):
-            out += [m for m in self.get_all(type_name) if source.get_or_none(type_name, m.get_unique_id()) is None]
-        return out
+    # -- deletes --------------------------------------------------------------
 
     def preview_delete(self, model, scheduled: set[tuple[str, int]]) -> list[str]:
         """Why deleting ``model`` would be refused (empty if it wouldn't), ignoring blockers that this run
         deletes first. Read-only; used by the dry run."""
         nb_model = _NB_MODEL[model.get_type()]
-        obj = _owned(self, nb_model, "view").filter(pk=model.nb_pk).first()
+        obj = _owned(self, nb_model, "view").filter(pk=model.nb_id).first()
         if obj is None:
             return ["not visible"]
         if not nb_model.objects.restrict(self.user, "delete").filter(pk=obj.pk).exists():
@@ -968,6 +1099,7 @@ _NB_MODEL = {
     "device_type": NBDeviceType,
     "device_role": NBDeviceRole,
     "site": NBSite,
+    "location": NBLocation,
     "rack": NBRack,
     "device": NBDevice,
     "cable": NBCable,

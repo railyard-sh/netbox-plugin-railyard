@@ -4,8 +4,7 @@ from unittest import mock
 
 from core.exceptions import JobFailed
 from dcim.models import Device
-
-from netbox_railyard.railyard.errors import RailyardTokenRejectedError
+from railyard_sync.errors import RailyardPlanLimitError, RailyardPlanRequiredError, RailyardTokenRejectedError
 
 from .base import SyncTestCase
 
@@ -51,7 +50,9 @@ class TargetTests(SyncTestCase):
 
     def test_expired_token_fails_with_rotation_advice(self):
         client = mock.MagicMock()
-        client.get_project.side_effect = RailyardTokenRejectedError("Railyard rejected … expired …", status=401)
+        client.netbox_sync_document.side_effect = RailyardTokenRejectedError(
+            "Railyard rejected … expired …", status=401
+        )
         result, job = self.sync(dry_run=False, client=client)
         self.assertIsInstance(result, JobFailed)
         self.assertIn("rotate the token", self.log(job))
@@ -69,3 +70,39 @@ class TargetTests(SyncTestCase):
     def test_plain_http_is_warned_about(self):
         _, job = self.sync(dry_run=True, settings_overrides={"railyard_url": "http://railyard.internal"})
         self.assertIn("not https", self.log(job))
+
+    def test_the_document_is_asked_for_this_netbox_release(self):
+        from netbox_railyard.jobs import netbox_release
+
+        self.sync(dry_run=True)
+        self.railyard.netbox_sync_document.assert_called_once_with("prj_it", netbox_version=netbox_release())
+
+    def test_a_plan_without_deliverables_shows_the_upgrade_message(self):
+        client = mock.MagicMock()
+        client.netbox_sync_document.side_effect = RailyardPlanRequiredError(
+            "The netbox-sync deliverable needs a paid plan.",
+            plan="community",
+            feature="deliverables",
+            deliverable="netbox-sync",
+            required_plans=["pro", "team"],
+            project_pass=True,
+        )
+        result, job = self.sync(dry_run=True, client=client)
+        self.assertIsInstance(result, JobFailed)
+        self.assertIn(
+            "Exporting to NetBox needs a plan with deliverables: the Community plan does not include them. "
+            "Upgrade to Pro or Team, or buy a Project Pass for this estate. Nothing was written to NetBox.",
+            self.log(job),
+        )
+        self.assertFalse(Device.objects.exists())
+
+    def test_an_estate_past_the_deliverable_rack_limit_shows_it(self):
+        client = mock.MagicMock()
+        client.netbox_sync_document.side_effect = RailyardPlanLimitError(
+            "too many racks", plan="pro", resource="racks", limit=100, current=140, required_plans=["team"]
+        )
+        result, job = self.sync(dry_run=True, client=client)
+        self.assertIsInstance(result, JobFailed)
+        self.assertIn(
+            "This estate has 140 racks; the Pro plan exports deliverables for estates of up to 100", self.log(job)
+        )

@@ -12,8 +12,10 @@
         <h5 class="card-header">Railyard → NetBox sync</h5>
         <div class="card-body">
           <p class="text-muted">
-            Reconcile a Railyard project into NetBox — racks, devices and cables. Railyard is the
-            source of truth; the sync creates and updates, and only deletes when you opt in.
+            Reconcile a Railyard estate into NetBox — sites, locations, racks, devices, ports and cables,
+            from Railyard's NetBox sync document. Railyard is the source of truth; the sync creates and
+            updates only objects it owns, and only deletes when you opt in. On hosted Railyard the sync
+            document is a paid deliverable.
           </p>
           {% render_form form %}
         </div>

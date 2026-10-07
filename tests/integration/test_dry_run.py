@@ -4,7 +4,7 @@ from core.models import ObjectChange
 from dcim.models import Device, Manufacturer, Site
 from extras.models import CustomField, Tag
 
-from .base import SyncTestCase, project
+from .base import RAILYARD_URL, SyncTestCase, creates, document, drop_devices, drop_racks, row
 
 
 class DryRunTests(SyncTestCase):
@@ -15,7 +15,7 @@ class DryRunTests(SyncTestCase):
     def test_first_dry_run_writes_nothing_at_all(self):
         result, job = self.sync(dry_run=True, allow_deletes=True)
         self.assertTrue(result["dry_run"])
-        self.assertEqual(result["diff"]["create"], 19)
+        self.assertEqual(result["diff"]["create"], creates(document()))
         self.assertFalse(Tag.objects.exists())
         self.assertFalse(CustomField.objects.exists())
         self.assertFalse(Device.objects.exists())
@@ -36,7 +36,7 @@ class DryRunTests(SyncTestCase):
         result, _ = self.sync(dry_run=True)
         self.assertEqual(result["conflicts"], 3)  # its devices are no longer recognised as owned
         # the documented migration: give the old tag the new identity
-        spec = ownership_tag("https://railyard.example", "prj_it", "Integration")
+        spec = ownership_tag(RAILYARD_URL, "prj_it", "Integration")
         tag.slug, tag.name, tag.description = spec.slug, spec.name, spec.description
         tag.save()
         result, _ = self.sync(dry_run=True)
@@ -45,10 +45,8 @@ class DryRunTests(SyncTestCase):
     def test_dry_run_after_a_sync_reports_without_applying(self):
         self.sync(dry_run=False)
         changes = ObjectChange.objects.count()
-        doc = project()
-        doc["dataCentres"][0]["status"] = "Planned"
-        doc["racks"][0]["placements"] = doc["racks"][0]["placements"][:2]
-        doc["powerLinks"] = []
+        doc = drop_devices(document(), "PDU-1")
+        row(doc, "sites", name="DC1")["status"] = "planned"
         result, job = self.sync(doc, dry_run=True, allow_deletes=True)
         self.assertEqual(result["diff"]["update"], 1)
         self.assertGreaterEqual(result["diff"]["delete"], 1)
@@ -70,9 +68,7 @@ class DryRunTests(SyncTestCase):
 
         rack = Device.objects.get(name="SW-1").rack
         operator_device("OPS-1", rack.site, rack=rack)
-        doc = project()
-        doc["racks"], doc["cables"], doc["powerLinks"] = [], [], []
-        _, job = self.sync(doc, dry_run=True, allow_deletes=True)
+        _, job = self.sync(drop_racks(document()), dry_run=True, allow_deletes=True)
         log = self.log(job)
         self.assertIn("delete: rack", log)
         self.assertIn("would be kept: still in use by 1 device", log)

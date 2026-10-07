@@ -1,0 +1,31 @@
+{% extends 'base/layout.html' %}
+{% load form_helpers %}
+
+{% block title %}Import into Railyard{% endblock %}
+
+{% block content %}
+<form method="post">
+  {% csrf_token %}
+  <div class="row">
+    <div class="col col-md-8 offset-md-2">
+      <div class="card">
+        <h5 class="card-header">NetBox → Railyard import</h5>
+        <div class="card-body">
+          <p class="text-muted">
+            Bring NetBox sites into Railyard as a design baseline — locations, racks, devices with their
+            ports, cables and power — or refresh an estate imported before. What was designed in Railyard
+            is kept, and nothing in NetBox is changed. Start with a dry run and read the job log.
+          </p>
+          {% render_form form %}
+        </div>
+        <div class="card-footer text-end">
+          <a href="{% url 'home' %}" class="btn btn-outline-secondary">Cancel</a>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-upload"></i> Run import
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</form>
+{% endblock %}

@@ -22,6 +22,7 @@ def railyard_settings() -> dict:
         "devicetype_library_ref": setting("devicetype_library_ref"),
         "devicetype_cache_dir": setting("devicetype_cache_dir"),
         "import_components": setting("import_components", False),
+        "netbox_url": setting("netbox_url"),
     }
 
 

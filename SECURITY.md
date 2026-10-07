@@ -38,4 +38,6 @@ The README covers this in detail. In short: back up NetBox before syncing, dry-r
 sync a dedicated, least-privilege Railyard token and rotate it before it expires, restrict which
 Railyard organisations and projects can be synced (`railyard_allowed_orgs` /
 `railyard_allowed_projects`), and grant the NetBox permissions to run a sync only to the people who
-should change your DCIM data.
+should change your DCIM data. The import writes estates to Railyard with the same token: give the token's user
+the *editor* role only in the organisations you import into, and grant the import's permissions only to the
+people who may send NetBox's data there.

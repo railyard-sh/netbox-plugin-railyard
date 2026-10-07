@@ -7,7 +7,7 @@ on:
 
 jobs:
   core:
-    name: core suite (no NetBox)
+    name: NetBox-free suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,13 +17,18 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint
-        run: ruff check .
+        run: ruff check . && ruff format --check .
       - name: Test
         run: pytest -q
 
   netbox:
-    name: integration suite (NetBox 4.6)
+    name: integration suite (NetBox ${{ matrix.netbox }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The releases the plugin supports (PluginConfig min_version/max_version): keep them in step.
+        netbox: ["4.5.10", "4.6.10", "4.7.2"]
     services:
       postgres:
         image: postgres:16
@@ -42,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: netbox-community/netbox
-          ref: v4.6.9
+          ref: v${{ matrix.netbox }}
           path: .netbox
       - uses: actions/setup-python@v5
         with:
@@ -62,6 +67,8 @@ jobs:
               "caching": {"HOST": "localhost", "PORT": 6379, "DATABASE": 1, "SSL": False},
           }
           SECRET_KEY = "ci-only-not-a-secret-ci-only-not-a-secret-ci-only-not-a-secret"
+          # v2 API tokens (the import tests read this NetBox's REST API with one)
+          API_TOKEN_PEPPERS = {1: "ci-only-pepper-ci-only-pepper-ci-only-pepper-ci-only-pepper"}
           DEBUG = False
           PLUGINS = ["netbox_railyard"]
           CONF

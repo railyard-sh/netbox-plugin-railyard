@@ -10,8 +10,11 @@
 #
 #   PLUGINS = ["netbox_railyard"]
 #   DEBUG = False  # the debug toolbar refuses to run under tests
+#   API_TOKEN_PEPPERS = {1: "<50 or more characters>"}  # the import tests use a v2 API token
 #
-# The plugin is installed (editable) into that virtualenv. Django creates and destroys its own test
+# The plugin is installed (editable) into that virtualenv, with railyard-sync from GitHub at the commit
+# pyproject.toml pins. To test against a local railyard-sync checkout instead, install it into the same
+# virtualenv afterwards: uv pip install --python "$PY" -e ../railyard-sync Django creates and destroys its own test
 # database, so the configured database is not modified.
 set -euo pipefail
 

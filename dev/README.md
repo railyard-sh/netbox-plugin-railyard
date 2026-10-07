@@ -1,7 +1,7 @@
 # Local NetBox for testing the plugin
 
 Spins up a real NetBox (via [netbox-docker](https://github.com/netbox-community/netbox-docker)) with
-this plugin installed, so you can run a Railyard → NetBox sync end-to-end.
+this plugin installed, so you can run a Railyard → NetBox sync, or an import into Railyard, end-to-end.
 
 ## Prerequisites
 
@@ -29,13 +29,18 @@ docker compose logs -f netbox | grep -m1 "Application ready"
 docker compose exec netbox /opt/netbox/netbox/manage.py createsuperuser
 ```
 
-NetBox listens on **127.0.0.1:8000** only. Open **http://localhost:8000**, sign in, and go to **Plugins → Railyard → Run sync**. Enter a
-project id/slug (and org if needed), keep **Dry run** ticked for the first pass to preview the diff in
-the job log, then untick it to apply.
+NetBox listens on **127.0.0.1:8000** only. Open **http://localhost:8000**, sign in, and go to **Plugins → Railyard →
+Sync from Railyard**. Enter a project id/slug (and org if needed), keep **Dry run** ticked for the first pass to
+preview the diff in the job log, then untick it to apply. The sync reads Railyard's NetBox sync document: on
+hosted Railyard the estate's plan must include deliverables; a local Railyard with billing off serves it to
+every estate. **Plugins → Railyard → Import into Railyard** goes the other way (its token needs the *editor*
+role in the org you import into).
 
 ## Iterating on the plugin
 
-After editing the plugin, re-sync the source and rebuild:
+After editing the plugin, re-sync the source and rebuild. `dev/setup.sh` fetches railyard-sync at the commit
+`pyproject.toml` pins; to try local railyard-sync changes, pass your checkout with
+`RAILYARD_SYNC_DIR=../railyard-sync ./dev/setup.sh`.
 
 ```bash
 ./dev/setup.sh && (cd ../netbox-docker-railyard && docker compose build && docker compose up -d)
@@ -53,7 +58,8 @@ docker compose down -v         # wipe the database/volumes too
 
 `dev/setup.sh` clones netbox-docker, copies the plugin source into its build context, and drops in:
 
-- `Dockerfile-Plugins` — `FROM` the pinned NetBox image, `pip install` the plugin
+- `Dockerfile-Plugins` — `FROM` the pinned NetBox image, `uv pip install` railyard-sync (fetched into the build
+  context by `setup.sh`, so the image needs no git) and the plugin
 - `docker-compose.override.yml` — builds netbox/worker/housekeeping from that image, maps port 8000
   on the loopback interface only, and passes `RAILYARD_*` env through
 - `configuration/plugins.py` — enables `netbox_railyard` and wires `PLUGINS_CONFIG` from the env

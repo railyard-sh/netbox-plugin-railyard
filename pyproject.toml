@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-plugin-railyard"
-version = "0.1.0"
-description = "Sync a Railyard data-centre design into NetBox (racks, devices, cables) with DiffSync."
+version = "0.2.0"
+description = "Sync a Railyard data-centre design into NetBox, and import NetBox sites into Railyard."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Railyard" }]
-keywords = ["netbox", "netbox-plugin", "dcim", "diffsync", "railyard", "ssot"]
+keywords = ["netbox", "netbox-plugin", "dcim", "diffsync", "railyard", "ssot", "import", "export"]
 classifiers = [
   "Framework :: Django",
   "Intended Audience :: System Administrators",
@@ -18,12 +18,19 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 
-# Runtime deps for the *Railyard side* (the extractable core). NetBox itself supplies
-# Django and the DCIM ORM at runtime, so they are deliberately NOT listed here.
+# The Railyard side (API client, sync-document source, canonical DiffSync models, importer, ownership tag)
+# is the shared railyard-sync package, so the plugin and the `railyard-sync` CLI behave identically.
+# railyard-sync is not on PyPI yet: it is installed from GitHub, pinned to a commit (move this to the
+# release tag, then to a PyPI version range, as soon as they exist). NetBox itself supplies Django and the
+# DCIM ORM at runtime, so they are deliberately NOT listed here.
+#
+# Lower bounds are security floors; upper bounds stop an untested major release arriving silently:
+# - requests 2.32.4 fixes CVE-2024-35195 and CVE-2024-47081 (railyard-sync requires the same floor).
+# - diffsync 2.x is the API the target adapter is written against (Adapter, DiffSyncFlags).
 dependencies = [
+  "railyard-sync @ git+https://github.com/railyard-sh/railyard-sync@v0.2.1",
   "diffsync>=2.2,<3",
-  "requests>=2.31",
-  "PyYAML>=6",
+  "requests>=2.32.4,<3",
 ]
 
 [project.optional-dependencies]
@@ -45,8 +52,8 @@ netbox_railyard = ["templates/**/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The core suite imports only the NetBox-independent `netbox_railyard.railyard`
-# package, so it runs without a NetBox install.
+# The NetBox-free suite imports only `netbox_railyard.policy` (and railyard-sync), so it runs without a
+# NetBox install; tests/integration runs under NetBox's test runner.
 addopts = "-q"
 
 [tool.ruff]

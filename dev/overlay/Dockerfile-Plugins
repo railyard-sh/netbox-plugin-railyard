@@ -3,6 +3,10 @@
 ARG VERSION=v4.6-3.4.0
 FROM netboxcommunity/netbox:${VERSION}
 
+COPY ./railyard-sync /opt/railyard-sync
 COPY ./netbox-plugin-railyard /opt/netbox-plugin-railyard
-# netbox-docker 5.x ships a uv-managed venv (no pip in it), so install with uv into that venv.
-RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache /opt/netbox-plugin-railyard
+# netbox-docker 5.x ships a uv-managed venv (no pip in it), so install with uv into that venv. railyard-sync
+# comes from the build context (dev/setup.sh fetched it at the pinned commit), so the image needs no git; the
+# plugin's other requirements are railyard-sync's too.
+RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache /opt/railyard-sync \
+ && /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache --no-deps /opt/netbox-plugin-railyard

@@ -21,3 +21,6 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
+
+# NetBox checkout used by the integration suite in CI
+.netbox/

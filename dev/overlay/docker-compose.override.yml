@@ -10,12 +10,15 @@ services:
       args:
         VERSION: ${VERSION:-v4.6-3.4.0}
     ports:
-      - "8000:8080"
+      # Loopback only: this NetBox has a default-ish setup and holds your Railyard token, so don't
+      # expose it to the network.
+      - "127.0.0.1:8000:8080"
     environment:
       RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
       RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
       RAILYARD_ORG: ${RAILYARD_ORG:-}
-      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+      RAILYARD_ALLOWED_ORGS: ${RAILYARD_ALLOWED_ORGS:-}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-}
 
   netbox-worker:
     image: netbox-railyard:plugins
@@ -29,4 +32,5 @@ services:
       RAILYARD_URL: ${RAILYARD_URL:-https://railyard.sh}
       RAILYARD_TOKEN: ${RAILYARD_TOKEN:-}
       RAILYARD_ORG: ${RAILYARD_ORG:-}
-      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-master}
+      RAILYARD_ALLOWED_ORGS: ${RAILYARD_ALLOWED_ORGS:-}
+      RAILYARD_DEVICETYPE_REF: ${RAILYARD_DEVICETYPE_REF:-}

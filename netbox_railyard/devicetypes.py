@@ -1,11 +1,12 @@
-"""Ensure a Manufacturer + DeviceType exist in NetBox from a resolved device-type spec.
+"""Create a DeviceType in NetBox from a resolved device-type spec.
 
-This is the "netbox-community device types as a dependency" step: the source adapter has already
-resolved each Railyard catalogue entry against the devicetype-library (``railyard.devicetype_library``),
-so here we just materialise the Manufacturer + DeviceType in NetBox before a device that needs it is
-created. Device *components* are created explicitly by the cabling models (matching Railyard's own
-export), so — like that export — the device type itself is created lean; ``import_components`` is a hook
-for a future "import the full library template" mode.
+Railyard's NetBox sync document names each device type (manufacturer, model, slug, height, depth, part
+number) and its catalogue key, which is the netbox-community devicetype-library slug. Here the type is
+materialised in NetBox before a device that needs it is created. Device *components* are created explicitly
+by the cabling models (matching Railyard's own export), so — like that export — the device type is created
+lean; with ``import_components`` on, the library's component templates (resolved by railyard-sync's
+``DeviceTypeLibrary`` at a pinned commit) are created too. Existing device types are used as they are, never
+changed.
 
 NetBox-only module: imports ``dcim.models`` and therefore only loads inside a NetBox runtime.
 """
@@ -13,9 +14,8 @@ NetBox-only module: imports ``dcim.models`` and therefore only loads inside a Ne
 from __future__ import annotations
 
 from dcim.models import DeviceType, Manufacturer
-
-from .railyard.devicetype_library import DeviceTypeSpec
-from .railyard.mappings import slugify
+from railyard_sync.export.devicetype_library import DeviceTypeSpec
+from railyard_sync.export.mappings import slugify
 
 # devicetype-library component key -> (NetBox template model attribute on DeviceType, field map)
 _TEMPLATE_MODELS = {
@@ -29,29 +29,23 @@ _TEMPLATE_MODELS = {
 }
 
 
-def ensure_manufacturer(name: str, slug: str | None = None) -> Manufacturer:
-    slug = slug or slugify(name)
-    obj = Manufacturer.objects.filter(name=name).first()
-    if obj is None:
-        obj, _ = Manufacturer.objects.get_or_create(slug=slug, defaults={"name": name})
-    return obj
-
-
-def ensure_device_type(spec: DeviceTypeSpec, *, import_components: bool = False) -> DeviceType:
-    """Get-or-create the DeviceType for a spec. Idempotent — safe to call for every device."""
-    manufacturer = ensure_manufacturer(spec.manufacturer)
-    obj = DeviceType.objects.filter(manufacturer=manufacturer, model=spec.model).first()
-    if obj is None:
-        obj = DeviceType.objects.create(
-            manufacturer=manufacturer,
-            model=spec.model,
-            slug=spec.slug or slugify(f"{spec.manufacturer}-{spec.model}"),
-            u_height=spec.u_height or 1,
-            is_full_depth=spec.is_full_depth,
-            part_number=spec.part_number or "",
-        )
-        if import_components and spec.components:
-            _import_component_templates(obj, spec.components)
+def create_device_type(
+    spec: DeviceTypeSpec, manufacturer: Manufacturer, *, import_components: bool = False
+) -> DeviceType:
+    """Create the DeviceType for a spec under an existing manufacturer. The caller has already checked
+    that no such type exists (the sync never adopts or modifies a device type it didn't create)."""
+    obj = DeviceType(
+        manufacturer=manufacturer,
+        model=spec.model,
+        slug=spec.slug or slugify(f"{spec.manufacturer}-{spec.model}"),
+        u_height=1 if spec.u_height is None else spec.u_height,  # 0U types (PDUs) exist
+        is_full_depth=spec.is_full_depth,
+        part_number=spec.part_number or "",
+    )
+    obj.full_clean()
+    obj.save()
+    if import_components and spec.components:
+        _import_component_templates(obj, spec.components)
     return obj
 
 

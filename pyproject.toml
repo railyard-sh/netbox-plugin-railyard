@@ -20,8 +20,8 @@ classifiers = [
 
 # The Railyard side (API client, sync-document source, canonical DiffSync models, importer, ownership tag)
 # is the shared railyard-sync package, so the plugin and the `railyard-sync` CLI behave identically.
-# railyard-sync is not on PyPI yet: it is installed from GitHub, pinned to a commit (move this to the
-# release tag, then to a PyPI version range, as soon as they exist). NetBox itself supplies Django and the
+# railyard-sync is not on PyPI yet: it is installed from GitHub, pinned to a release tag (move this to a
+# PyPI version range as soon as it is published). NetBox itself supplies Django and the
 # DCIM ORM at runtime, so they are deliberately NOT listed here.
 #
 # Lower bounds are security floors; upper bounds stop an untested major release arriving silently:

@@ -95,13 +95,14 @@ See `netbox_railyard/CLAUDE.md` for the glue (target, reader, jobs, UI) and the 
   refresh is not saved; 412/409 become `ImportRefused`; a 402 `plan_limit` becomes `plans.plan_limit_message`.
 - Ids are `nb-<kind>-<NetBox pk>` (same prefix as the CLI), so the CLI and the plugin can refresh each other's
   estates when they record the same NetBox URL (`netbox_url` setting, else the URL the form was used on).
-- Needs `view` on `policy.IMPORT_MODELS` only; the Railyard token's user needs *editor* in the target org.
+- Needs `view` on `policy.IMPORT_MODELS` only; saving needs a *Read and write* Railyard token whose user is *editor* in the
+  target org (a *Read only* token gets 403 `token_read_only`; the sync and an import dry run work with one).
 
 ## Build / test
 
 ```
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"   # railyard-sync from GitHub at the pinned commit
+pip install -e ".[dev]"   # railyard-sync from GitHub at the pinned release tag
 pytest                    # NetBox-free suite
 ruff check . && ruff format --check .
 NETBOX_DIR=/path/to/netbox ./dev/run-integration-tests.sh   # tests/integration: NetBox + Postgres + Redis

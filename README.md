@@ -81,7 +81,9 @@ NetBox (give both the same Railyard URL).
 
 Devices carry a `railyard_id` custom field (the Railyard placement id). A device **renamed in Railyard is
 renamed in place** in NetBox — same NetBox object, components, cables and history — unless the new name is
-taken in the site, which is reported as a conflict. Design tags on racks and devices are created in NetBox
+taken in the site, which is reported as a conflict. Locations and racks the sync created under a name with an alias
+(`A [3fa9c2d1e0]`), which Railyard's sync document gave a name repeated anywhere in the estate until it began
+aliasing only names repeated within a site, are renamed in place to the name Railyard now gives them. Design tags on racks and devices are created in NetBox
 when missing and follow Railyard on owned objects; serials, comments, cable types, statuses and colours do too.
 
 #### Device types

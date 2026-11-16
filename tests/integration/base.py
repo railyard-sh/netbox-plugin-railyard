@@ -9,6 +9,7 @@ Railyard's own exporter), the import's a fake Railyard API, and the device-type 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import pathlib
@@ -92,6 +93,27 @@ def drop_racks(doc: dict) -> dict:
     """``doc`` with no racks (and so nothing in them); sites, locations, types and roles stay."""
     drop_all_devices(doc)
     doc["objects"]["racks"] = []
+    return doc
+
+
+def aliased(doc: dict) -> dict:
+    """``doc`` as Railyard wrote it before it scoped names to their site: every location and rack name with the
+    alias `` [<digest>]`` (the SHA-256 of its Railyard id, ten hex digits) it gave a name repeated in the estate."""
+    doc = copy.deepcopy(doc)
+    objects = doc["objects"]
+
+    def alias(r: dict) -> str:
+        return f"{r['name']} [{hashlib.sha256(r['railyard']['id'].encode()).hexdigest()[:10]}]"
+
+    locations = {r["name"]: alias(r) for r in objects["locations"]}
+    racks = {r["name"]: alias(r) for r in objects["racks"]}
+    for r in objects["locations"]:
+        r["name"], r["parent"] = locations[r["name"]], locations.get(r["parent"], r["parent"])
+    for r in objects["racks"]:
+        r["name"], r["location"] = racks[r["name"]], locations.get(r["location"], r["location"])
+    for r in objects["devices"]:
+        r["location"] = locations.get(r["location"], r["location"])
+        r["rack"] = racks.get(r["rack"], r["rack"])
     return doc
 
 

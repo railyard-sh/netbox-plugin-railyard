@@ -682,6 +682,10 @@ class NetBoxCable(_Deletes, models.Cable):
 
 
 class NetBoxAdapter(OwnershipMixin, Adapter):
+    # Owned locations and racks named with an alias an earlier sync document gave them follow the name Railyard
+    # gives them now, renamed in place (railyard-sync's OwnershipMixin.detect_place_renames; apply_renames below).
+    renames_places = True
+
     manufacturer = NetBoxManufacturer
     device_type = NetBoxDeviceType
     device_role = NetBoxDeviceRole
@@ -887,6 +891,12 @@ class NetBoxAdapter(OwnershipMixin, Adapter):
     def _owns(self, model) -> bool:
         return self.get_or_none(model.get_type(), model.get_unique_id()) is not None
 
+    def place_named(self, model_type: str, site: str, name: str) -> int | None:
+        nb_site = _find_site(site)
+        nb_model = NBLocation if model_type == "location" else NBRack
+        found = nb_model.objects.filter(site=nb_site, name=name).first() if nb_site else None
+        return found.pk if found else None
+
     def device_named(self, site: str, name: str) -> int | None:
         nb_site = _find_site(site)
         found = NBDevice.objects.filter(site=nb_site, name__iexact=name).first() if nb_site else None
@@ -1009,7 +1019,16 @@ class NetBoxAdapter(OwnershipMixin, Adapter):
         return report
 
     def apply_renames(self) -> None:
-        """Rename the NetBox devices ``reconcile`` found renamed in Railyard (a real run only)."""
+        """Rename the NetBox locations, racks and devices ``reconcile`` found renamed (a real run only)."""
+        for model_type, site, old, new, pk in self.place_renames:
+            nb_model = NBLocation if model_type == "location" else NBRack
+            obj = _owned(self, nb_model, "change").filter(pk=pk).first()
+            if obj is None:
+                raise PermissionDenied(
+                    f"{model_type} {site}/{old}: no longer a Railyard-owned {model_type} that {self.user} may change"
+                )
+            obj.name = new
+            _save(self, obj, clean=True)
         for old, new, pk in self.renames:
             obj = _owned(self, NBDevice, "change").filter(pk=pk).first()
             if obj is None:

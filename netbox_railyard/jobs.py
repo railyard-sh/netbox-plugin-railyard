@@ -375,7 +375,7 @@ class RailyardSyncJob(RailyardJob):
 
     def _summary(self, target, diff, deletes) -> dict:
         summary = diff.summary()
-        summary["update"] = summary.get("update", 0) + len(target.renames)
+        summary["update"] = summary.get("update", 0) + len(target.renames) + len(target.place_renames)
         summary["delete"] = len(deletes)
         self.logger.info(f"Diff: {summary}")
         return summary
@@ -482,8 +482,12 @@ class RailyardSyncJob(RailyardJob):
     def _log_changes(self, target, diff, deletes, verb: str) -> None:
         """Per-object create/update so a run reads as a changelog, not just a count. Creates on a first sync can
         number in the thousands, so creates and updates are capped; deletes are logged in full elsewhere."""
-        planned = planned_changes(diff, len(target.renames), deletes)
-        lines = [f"rename: device {old} → {new}" for old, new, _ in target.renames] + change_lines(diff)
+        planned = planned_changes(diff, len(target.renames), deletes, target.place_renames)
+        lines = (
+            [f"rename: {kind} {site}/{old} → {new}" for kind, site, old, new, _ in target.place_renames]
+            + [f"rename: device {old} → {new}" for old, new, _ in target.renames]
+            + change_lines(diff)
+        )
         for action in ("create", "update"):
             rows = [
                 line

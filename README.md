@@ -14,6 +14,9 @@ document reader, the importer, the ownership tag) is the shared
 [`railyard-sync`](https://github.com/railyard-sh/railyard-sync) package, so the plugin and the `railyard-sync`
 command line behave identically and recognise each other's work.
 
+Railyard's guide to working with NetBox, from either side, is
+[NetBox & Nautobot](https://railyard.sh/docs/netbox-nautobot) in the Railyard documentation.
+
 > [!WARNING]
 > **Pre-1.0 software that writes to your NetBox. Back up your NetBox database before every sync.**
 > Run a **dry run** first and read its job log before applying anything, and try it on a copy of your

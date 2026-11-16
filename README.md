@@ -217,8 +217,8 @@ only the orgs and projects you choose can be reached, even if the token's user c
 If the token is wrong, revoked or **expired**, Railyard returns HTTP 401 and the job fails with a message
 saying so. Rotate the token as above. A 403 means the token works but cannot do this: its user can't read (or,
 for an import, write) that org or project, the token is *Read only* and the import tried to save, the
-organisation does not allow personal access tokens, or the estate's main design takes changes only through
-merge requests (which the import cannot save to).
+organisation does not allow personal access tokens, or the user may change the estate only through merge
+requests (its main requires approvals, or the user's role only proposes changes), which the import cannot save to.
 
 ### NetBox permissions
 

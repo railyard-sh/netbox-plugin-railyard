@@ -5,7 +5,7 @@ from core.exceptions import JobFailed
 from dcim.models import Cable, Device, Interface, Location, Rack, Site
 from extras.models import Tag
 
-from .base import RAILYARD_URL, SyncTestCase, document, rename_device, row
+from .base import RAILYARD_URL, SyncTestCase, aliased, document, rename_device, row
 from .test_ownership import operator_site
 
 
@@ -44,6 +44,30 @@ class SyncDocumentTests(SyncTestCase):
         self.assertTrue(Cable.objects.filter(pk=cable.pk).exists())  # its cable was not re-made
         self.assertEqual(result["diff"]["delete"], 0, self.log(job))
         again, job = self.sync(doc, dry_run=True)
+        self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0, self.log(job))
+
+    def test_a_location_and_rack_that_lose_an_earlier_alias_are_renamed_in_place(self):
+        """Railyard's document once named them "A [<digest>]" and "R1 [<digest>]"; it now says "A" and "R1". The
+        owned location and rack are renamed, keeping their NetBox ids and what is in them, instead of a second
+        location with the same slug being created (which NetBox refuses)."""
+        self.apply(aliased(document()))
+        location = Location.objects.get(name__startswith="A [")
+        rack = Rack.objects.get(name__startswith="R1 [")
+        devices = set(Device.objects.filter(rack=rack).values_list("pk", flat=True))
+
+        dry, job = self.sync(document(), dry_run=True)
+        self.assertEqual((dry["renamed"], dry["diff"]["create"]), (2, 0), self.log(job))
+        self.assertIn(f"rename: location DC1/{location.name} → A", self.log(job))
+        self.assertIn(f"rename: rack DC1/{rack.name} → R1", self.log(job))
+        self.assertEqual(Location.objects.get(pk=location.pk).name, location.name)  # a dry run writes nothing
+
+        result, job = self.apply(document(), allow_deletes=True)
+        self.assertEqual((result["diff"]["create"], result["diff"]["delete"]), (0, 0), self.log(job))
+        self.assertEqual(Location.objects.get(pk=location.pk).name, "A")
+        self.assertEqual(Rack.objects.get(pk=rack.pk).name, "R1")
+        self.assertEqual(set(Device.objects.filter(rack_id=rack.pk).values_list("pk", flat=True)), devices)
+        self.assertEqual((Location.objects.count(), Rack.objects.count()), (1, 1))
+        again, job = self.sync(document(), dry_run=True)
         self.assertEqual(again["diff"]["create"] + again["diff"]["update"], 0, self.log(job))
 
     def test_a_rename_onto_an_operator_device_is_a_conflict(self):

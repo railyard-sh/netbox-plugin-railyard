@@ -71,7 +71,7 @@ Open http://localhost:8000  →  Plugins → Railyard → Run sync.
 
 Set your Railyard token first (either edit configuration/plugins.py, or export before 'up'):
   export RAILYARD_TOKEN=ry_your_token_here
-  export RAILYARD_URL=https://railyard.sh     # or dev.railyard.sh / your instance
+  export RAILYARD_URL=https://railyard.sh     # or your own Railyard
   docker compose up -d
 
 Re-run this script after editing the plugin, then: docker compose build && docker compose up -d

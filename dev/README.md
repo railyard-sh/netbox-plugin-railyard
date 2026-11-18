@@ -7,8 +7,9 @@ this plugin installed, so you can run a Railyard → NetBox sync, or an import i
 
 - **Docker Desktop running.**
 - A **Railyard personal access token** (`ry_…`) with access to the org/project you want to sync
-  (Railyard → User settings → Personal access tokens). Prefer a token for a dedicated *viewer* user
-  with a short expiry (see the main README), and never commit it.
+  (Railyard → User settings → API tokens). Prefer a *Read only* token for a dedicated *viewer* user
+  with a short expiry, and a *Read and write* one only to try the import (see the main README); never
+  commit it.
 
 ## Bring it up
 
@@ -17,7 +18,7 @@ this plugin installed, so you can run a Railyard → NetBox sync, or an import i
 cd ../netbox-docker-railyard         # the work dir setup.sh prints
 
 export RAILYARD_TOKEN=ry_your_token_here
-export RAILYARD_URL=https://railyard.sh      # or dev.railyard.sh, or your own instance
+export RAILYARD_URL=https://railyard.sh      # or your own Railyard
 export RAILYARD_ORG=my-org                   # the org to sync from (else your personal org)
 
 docker compose build

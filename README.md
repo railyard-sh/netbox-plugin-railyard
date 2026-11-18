@@ -14,6 +14,9 @@ document reader, the importer, the ownership tag) is the shared
 [`railyard-sync`](https://github.com/railyard-sh/railyard-sync) package, so the plugin and the `railyard-sync`
 command line behave identically and recognise each other's work.
 
+Railyard's guide to working with NetBox, from either side, is
+[NetBox & Nautobot](https://railyard.sh/docs/netbox-nautobot) in the Railyard documentation.
+
 > [!WARNING]
 > **Pre-1.0 software that writes to your NetBox. Back up your NetBox database before every sync.**
 > Run a **dry run** first and read its job log before applying anything, and try it on a copy of your
@@ -134,20 +137,23 @@ other way round.
 
 ## Install
 
-`railyard-sync` is not on PyPI yet, so it is installed from GitHub, pinned to a commit, as a dependency of the
-plugin. Installing the plugin installs it (pip needs `git` for that):
+Neither the plugin nor `railyard-sync` is on PyPI yet, so both are installed from GitHub. The plugin depends on
+railyard-sync pinned to a release tag (`v0.2.1`, in `pyproject.toml`), so installing the plugin installs it too
+(pip needs `git` for that). Into NetBox's virtualenv:
 
 ```bash
-pip install netbox-plugin-railyard        # (once published)
-# or, from a checkout, into the NetBox virtualenv:
-pip install -e /opt/netbox-plugin-railyard
+pip install "netbox-plugin-railyard @ git+https://github.com/railyard-sh/netbox-plugin-railyard"
+# or, from a checkout:
+pip install /opt/netbox-plugin-railyard
 ```
 
-Without `git` on the NetBox host (the netbox-docker image, say), install railyard-sync first from a
-source archive, then the plugin without dependencies:
+Add the same line to NetBox's `local_requirements.txt` so NetBox's `upgrade.sh` reinstalls it.
+
+Without `git` on the NetBox host (the netbox-docker image, say), install railyard-sync first from its release
+archive, then the plugin without dependencies:
 
 ```bash
-pip install https://github.com/railyard-sh/railyard-sync/archive/<commit in pyproject.toml>.tar.gz
+pip install https://github.com/railyard-sh/railyard-sync/archive/refs/tags/v0.2.1.tar.gz
 pip install --no-deps /opt/netbox-plugin-railyard
 ```
 
@@ -183,16 +189,25 @@ been tested with them.
 
 ### The Railyard token: least privilege, expiry and rotation
 
-Every job uses the one token configured here, whichever NetBox user runs it, and it can read **everything its
-Railyard user can see**. Railyard tokens aren't scoped yet, so limit what that user can see:
+Every job uses the one token configured here, whichever NetBox user runs it, and it can reach **everything its
+Railyard user can see**. Limit both the token and the user:
 
 1. **Use a dedicated Railyard user for the plugin**, not a person's account.
-2. **Give it the least role that works, only in the organisations it needs.** The sync only reads from
-   Railyard, so for the sync alone use the *viewer* role. The **import writes estates**, so it needs the
-   *editor* role in the organisations you import into; use the import only if you are content for NetBox
-   users with the import permissions to write there.
-3. Create its token under **User settings → Personal access tokens**. Tokens **expire** (90 days by default,
-   7–365 days if you choose); choose the shortest expiry you are prepared to rotate.
+2. **Give the token the least access that works.** A Railyard token is *Read only* or *Read and write*,
+   chosen when it is created:
+
+   | Job | Token access | Railyard role of the token's user |
+   |---|---|---|
+   | Sync from Railyard (dry run or real) | *Read only* | *viewer* is enough |
+   | Import into Railyard, dry run | *Read only* | *viewer* is enough |
+   | Import into Railyard, saving the estate | **Read and write** | *editor* in the organisations you import into |
+
+   If you use only the sync, give the plugin a *Read only* token: then it cannot change anything in Railyard,
+   whatever the user's role. Use a *Read and write* token only if you are content for NetBox users with the
+   import permissions to write estates there. With a *Read only* token, an import's save fails with a message
+   saying the token is read-only, and nothing is saved.
+3. Create its token under **User settings → API tokens**. Tokens **expire** (90 days by default, up to a year
+   if you choose); choose the shortest expiry you are prepared to rotate.
 4. Store it in a file readable only by NetBox (`railyard_token_file`), not in `configuration.py` or in
    version control.
 5. **Rotate it before it expires.** Create a new token, replace the file, then revoke the old token in
@@ -203,8 +218,10 @@ Also set `railyard_org` / `railyard_allowed_orgs` (and, if you like, `railyard_a
 only the orgs and projects you choose can be reached, even if the token's user can see others.
 
 If the token is wrong, revoked or **expired**, Railyard returns HTTP 401 and the job fails with a message
-saying so. Rotate the token as above. A 403 means the token works but its user can't read (or, for an import,
-write) that org or project.
+saying so. Rotate the token as above. A 403 means the token works but cannot do this: its user can't read (or,
+for an import, write) that org or project, the token is *Read only* and the import tried to save, the
+organisation does not allow personal access tokens, or the user may change the estate only through merge
+requests (its main requires approvals, or the user's role only proposes changes), which the import cannot save to.
 
 ### NetBox permissions
 
@@ -281,7 +298,7 @@ Each run is a native NetBox background Job; watch progress and the log on the Jo
 
 ```bash
 python3.12 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"   # installs railyard-sync from GitHub at the pinned commit
+pip install -e ".[dev]"   # installs railyard-sync from GitHub at the pinned release tag
 pytest                    # the NetBox-free suite (policy)
 ruff check .
 ```
@@ -310,7 +327,7 @@ them. For a clickable local NetBox, use [`dev/setup.sh`](dev/README.md).
 - [x] Integration test suite against NetBox 4.5, 4.6 and 4.7
 - [ ] railyard-sync on PyPI (then the plugin on PyPI)
 - [ ] Field testing against real estates
-- [ ] Nautobot app reusing railyard-sync
+- [x] [Nautobot app](https://github.com/railyard-sh/nautobot-app-railyard) reusing railyard-sync
 
 ## Security
 
